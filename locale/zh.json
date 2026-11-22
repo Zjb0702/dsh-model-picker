@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "模型选择器",
+    "description": "zcode 风格的两级模型选择：左侧供应商栏、悬停即切换模型列表、思考强度滑条，选中后回填到输入框。",
+    "detail": "docs/DETAIL.md"
+  }
+}

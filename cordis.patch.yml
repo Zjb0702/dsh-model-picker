@@ -1,0 +1,6 @@
+# 插件行：把本包的主入口（Host 半边）挂进 Web 组合。
+# package.json 里的 dsh.client 声明会让浏览器加载 ./client 作为客户端半边，
+# 它在输入框的模型座位上注册两级选择器。
+- insert:
+    - id: dsh-model-picker
+      name: '@local/dsh-model-picker'

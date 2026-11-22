@@ -1,0 +1,42 @@
+{
+  "name": "@local/dsh-model-picker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "zcode 风格的两级模型选择器：左侧供应商栏、悬停即切换的模型面板、思考强度滑条，选中后回填到输入框。",
+  "icon": "icon.svg",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "docs/DETAIL.md",
+    "README.md"
+  ],
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.2-rc.3"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "license": "MIT"
+}

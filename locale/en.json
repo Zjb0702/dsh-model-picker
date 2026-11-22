@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Model picker",
+    "description": "Two-level zcode-style model selection: a provider rail, a hover-driven model list, and a reasoning-effort slider that writes the choice back to the composer.",
+    "detail": "docs/DETAIL.md"
+  }
+}
