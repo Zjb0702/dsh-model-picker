@@ -40,7 +40,6 @@ window.__ModuleLoader__.load({
 			xhigh: 'X-High',
 			max: 'Max',
 		};
-		const PANEL_MAX_HEIGHT = 420;
 		// 偏好存储（Host 半边提供）：按「供应商 + 模型」记忆思考档位，
 		// 并记住左侧供应商栏的顺序。页面重载、App 重启后仍在。
 		const STATE_URL = '/api/dsh-model-picker/state';
@@ -251,6 +250,40 @@ window.__ModuleLoader__.load({
 /* 首尾两个标签不越出面板边界。 */
 .dsh-mp-label[data-edge='start'] { transform: none; }
 .dsh-mp-label[data-edge='end'] { transform: translateX(-100%); }
+
+/* 面板缩放：四块热区是绝对定位的透明薄片，默认 pointer-events:none——
+   没被“武装”前它们对指针完全透明，划过边框既不改光标也不抢事件。
+   指针在热区内静止够久（见 trackHover）才把 data-armed 置 true，
+   此时才接管指针并显示对应的缩放光标与一条细提示线。 */
+.dsh-mp-grip { position: absolute; z-index: 60; pointer-events: none; background: transparent; }
+.dsh-mp-grip[data-armed='true'] { pointer-events: auto; }
+.dsh-mp-grip::after {
+	content: ''; position: absolute; border-radius: 2px; opacity: 0;
+	background: var(--dsw-alias-state-business-primary); transition: opacity .12s ease;
+}
+.dsh-mp-grip[data-armed='true']::after { opacity: .55; }
+.dsh-mp-grip[data-zone='rail-w'][data-armed='true'],
+.dsh-mp-grip[data-zone='pane-w'][data-armed='true'] { cursor: col-resize; }
+.dsh-mp-grip[data-zone='top'][data-armed='true'] { cursor: row-resize; }
+.dsh-mp-grip[data-zone='corner'][data-armed='true'] { cursor: nwse-resize; }
+.dsh-mp-grip[data-zone='rail-w']::after,
+.dsh-mp-grip[data-zone='pane-w']::after { top: 10px; bottom: 10px; left: 2px; width: 1px; }
+.dsh-mp-grip[data-zone='top']::after { left: 10px; right: 10px; top: 2px; height: 1px; }
+.dsh-mp-grip[data-zone='corner']::after { left: 2px; top: 2px; width: 6px; height: 6px; border-radius: 2px; }
+/* 缩放中的行内文案不要被选中（拖到面板外时也不会选到旁边的文字）。 */
+.dsh-mp-layer[data-resizing='true'] { user-select: none; }
+/* 用户手动定高之后，模型列表吃掉剩余高度，而不是固定 220px 上限。 */
+.dsh-mp-layer[data-sized='true'] .dsh-mp-models { flex: 1 1 auto; max-height: none; }
+.dsh-mp-layer[data-sized='true'] .dsh-mp-card { min-height: 0; }
+/* 拖到很矮时宁可让两栏各自滚动，也不把思考强度滑条裁掉。 */
+.dsh-mp-layer[data-sized='true'] .dsh-mp-pane { overflow-y: auto; }
+/* 拖动中的尺寸读数：实时预览的辅助反馈，松手消失。 */
+.dsh-mp-size-badge {
+	position: absolute; right: 8px; bottom: 6px; z-index: 61; pointer-events: none;
+	padding: 1px 6px; border-radius: 6px; font-size: 10px; line-height: 16px;
+	color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-3);
+	font-variant-numeric: tabular-nums;
+}
 `;
 
 		/* ---------- 图标：不依赖宿主的 primitives 包，自带最小 SVG ---------- */
@@ -278,8 +311,21 @@ window.__ModuleLoader__.load({
 		};
 		// ---- 偏好状态（供应商顺序 + 按模型记住的思考档位） -------------------
 		// #region 偏好状态辅助（纯函数；test/client-prefs.test.mjs 取这一段直接测）
+		// 面板可缩放：所有边界值集中在这里，纯函数与组件共用同一套数字。
+		const PANEL_LIMITS = {
+			railMin: 120, railMax: 420,      // 供应商栏宽
+			paneMin: 220, paneMax: 760,      // 模型栏宽
+			heightMin: 180, heightMax: 660,  // 两栏共用的高度（硬约束：只有一个 height）
+			margin: 8,                       // 面板与视口边缘的最小间隙
+			hitWidth: 5,                     // 边框热区厚度
+			corner: 12,                      // 左上角热区的横向宽度
+			hoverDelayMs: 140,               // 指针在热区静止多久才切光标/提示
+			hoverMoveTolerance: 4,           // 静止判定允许的抖动
+			dragThreshold: 3,                // 按下后移动多少像素才真正开始缩放
+		};
 		// 存储里的 efforts 是 [{provider, model, effort}]；客户端只用两个小工具
 		// 读写它，不假设顺序，也不依赖存储里一定有某条记录。
+		const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
 		const findRememberedEffort = (state, provider, model) => {
 			if (state === undefined || state === null) return undefined;
 			const record = state.efforts.find((item) => item.provider === provider && item.model === model);
@@ -293,7 +339,15 @@ window.__ModuleLoader__.load({
 			if (!Array.isArray(efforts)) return false;
 			return efforts.some((effort) => effort.id === effortId);
 		};
+		// 尺寸布局（v3 新增字段）：缺失/非法一律 null，表示沿用默认值或内容自适应。
+		const normalizeLayout = (value) => {
+			if (value === null || value === undefined || typeof value !== 'object' || Array.isArray(value)) return null;
+			const num = (raw) => (typeof raw === 'number' && Number.isFinite(raw) ? raw : null);
+			const layout = { railWidth: num(value.railWidth), paneWidth: num(value.paneWidth), height: num(value.height) };
+			return layout.railWidth === null && layout.paneWidth === null && layout.height === null ? null : layout;
+		};
 		const normalizePickerState = (value) => ({
+			layout: normalizeLayout(value?.layout ?? value?.panel ?? value?.size),
 			providerOrder: Array.isArray(value?.providerOrder)
 				? value.providerOrder.filter((id) => typeof id === 'string')
 				: [],
@@ -337,6 +391,138 @@ window.__ModuleLoader__.load({
 			const insertAt = Math.max(0, Math.min(without.length, target > from ? target - 1 : target));
 			if (insertAt === from) return order;
 			return [...without.slice(0, insertAt), dragId, ...without.slice(insertAt)];
+		};
+		// ---- 面板缩放（全部纯函数，组件只负责把结果搬到 DOM 上） ----------------
+		// 热区判定：输入指针与两张卡片的矩形，输出命中的热区名。
+		// 上边框两块卡片共用同一条 y 位置；左上角优先于左边框与上边框。
+		//   角   = [左, 左+corner] × [上, 上+hitWidth]
+		//   上边 = 任一卡片 [上, 上+hitWidth]
+		//   左边 = 卡片 [左, 左+hitWidth]（整条竖直边）
+		const resolveHitZone = (point, boxes, limits = PANEL_LIMITS) => {
+			const { rail, pane } = boxes;
+			const { x, y } = point;
+			if (rail === undefined || pane === undefined) return null;
+			const pad = 0.5; // 容差：边框本身有 1px 描边
+			const nearTop = y >= rail.top - pad && y <= rail.top + limits.hitWidth;
+			if (nearTop && x >= rail.left - pad && x <= rail.left + limits.corner) return 'corner';
+			const insideX = (box) => x >= box.left - pad && x <= box.left + box.width + pad;
+			if (nearTop && (insideX(rail) || insideX(pane))) return 'top';
+			const insideY = (box) => y >= box.top - pad && y <= box.top + box.height + pad;
+			if (insideY(rail) && x >= rail.left - pad && x <= rail.left + limits.hitWidth) return 'rail-w';
+			if (insideY(pane) && x >= pane.left - pad && x <= pane.left + limits.hitWidth) return 'pane-w';
+			return null;
+		};
+		// 各热区的光标形态；拖动中被 document.body 固定住，松手才恢复。
+		const panelCursor = (zone) => {
+			if (zone === null || zone === undefined) return undefined;
+			if (zone === 'corner') return 'nwse-resize';
+			if (zone === 'rail-w' || zone === 'pane-w') return 'col-resize';
+			if (zone === 'top') return 'row-resize';
+			return undefined;
+		};
+		// 悬停武装：指针在热区内静止到超过延迟阈值，才允许切光标/提示。
+		// state = { zone, since, x, y }；快速扫过（还没到时间就离开）不会命中。
+		const shouldArmHover = (state, now, limits = PANEL_LIMITS) => state !== null
+			&& state !== undefined
+			&& now - state.since >= limits.hoverDelayMs;
+		// 指针在等待期间移动超过容差：重新计时，避免“边扫边亮”。
+		const hoverNeedsRestart = (state, point, limits = PANEL_LIMITS) => state !== null
+			&& state !== undefined
+			&& Math.max(Math.abs(point.x - state.x), Math.abs(point.y - state.y)) > limits.hoverMoveTolerance;
+		// 按下后是否够格进入拖动：没超过阈值只算一次普通点击，不改尺寸。
+		const exceedsDragThreshold = (dx, dy, limits = PANEL_LIMITS) => Math.hypot(dx, dy) >= limits.dragThreshold;
+		// 拖动量先收敛到“边框还能跟手”的范围：被拖的边框到达上下限时，
+		// 多余位移直接丢掉，而不是让尺寸继续变、边框却停在原处。
+		const clampDragDelta = (zone, base, dx, dy) => {
+			const limits = PANEL_LIMITS;
+			let nextDx = dx;
+			let nextDy = dy;
+			if (zone === 'rail-w' || zone === 'corner') {
+				// 左边缘不能越过视口左边界；供应商栏宽度的上下限
+				nextDx = clampNumber(dx, Math.max(limits.margin - (base.left ?? 0), base.railWidth - limits.railMax),
+					base.railWidth - limits.railMin);
+			} else if (zone === 'pane-w') {
+				// 分栏：供应商栏与模型栏都不能越过各自上下限
+				const lower = Math.max(limits.railMin - base.railWidth, base.paneWidth - limits.paneMax);
+				const upper = Math.min(limits.railMax - base.railWidth, base.paneWidth - limits.paneMin);
+				nextDx = clampNumber(dx, Math.min(lower, upper), Math.max(lower, upper));
+			}
+			if (zone === 'top' || zone === 'corner') {
+				// 高度上下限（展开侧可用空间由 resolvePanelBox 再兜一次底）
+				const lower = limits.heightMin - base.height;
+				const upper = limits.heightMax - base.height;
+				nextDy = clampNumber(dy, Math.min(lower, upper), Math.max(lower, upper));
+			}
+			return { dx: nextDx, dy: nextDy };
+		};
+		// 拖动量换算：dx/dy 是相对按下点的位移，向左/向上为负。
+		//   - 供应商栏左边框 / 左上角：面板左边缘跟着指针走（left += dx），
+		//     供应商栏宽度反向变化，右侧内容原地不动——被拖的边框始终在指针下。
+		//   - 模型栏左边框（分栏边界）：总宽不变，供应商栏宽度补偿 dx，
+		//     模型栏宽度反向变化，于是边界跟着指针、两侧外边缘都不动。
+		//   - 上边框 / 左上角：只有 height 变化；四种手势写的是同一个 height，
+		//     两栏高度因此永远一致（不存在“只改一栏高度”的入口）。
+		const applyResizeDelta = (zone, base, dx, dy) => {
+			const left = base.left ?? 0;
+			const railWidth = zone === 'rail-w' || zone === 'corner'
+				? base.railWidth - dx
+				: zone === 'pane-w'
+					? base.railWidth + dx
+					: base.railWidth;
+			const paneWidth = zone === 'pane-w' ? base.paneWidth - dx : base.paneWidth;
+			return {
+				left: zone === 'rail-w' || zone === 'corner' ? left + dx : left,
+				railWidth,
+				paneWidth,
+				height: zone === 'top' || zone === 'corner' ? base.height - dy : base.height,
+			};
+		};
+		// 边界钳制 + 定位：把期望尺寸收敛成实际可用的尺寸与坐标。
+		// 返回的 height 只有一个：两栏由 flex stretch 共享同一高度，这是硬约束的结构保证。
+		const resolvePanelBox = (input) => {
+			const limits = PANEL_LIMITS;
+			const gap = input.gap ?? GAP;
+			const margin = limits.margin;
+			const viewportWidth = Math.max(320, input.viewportWidth);
+			const viewportHeight = Math.max(240, input.viewportHeight);
+			const maxTotalWidth = Math.max(limits.railMin + gap + limits.paneMin, viewportWidth - margin * 2);
+			let rail = clampNumber(Number(input.railWidth) || RAIL_WIDTH, limits.railMin, limits.railMax);
+			let pane = clampNumber(Number(input.paneWidth) || PANE_WIDTH, limits.paneMin, limits.paneMax);
+			// 总宽超出视口时先收模型栏（内容更容易压缩），仍不够再收供应商栏。
+			if (rail + gap + pane > maxTotalWidth) {
+				pane = Math.max(limits.paneMin, maxTotalWidth - gap - rail);
+				if (rail + gap + pane > maxTotalWidth) rail = Math.max(limits.railMin, maxTotalWidth - gap - pane);
+			}
+			const width = rail + gap + pane;
+			const left = clampNumber(
+				input.triggerLeft ?? margin,
+				margin,
+				Math.max(margin, viewportWidth - width - margin),
+			);
+			// 上下可用空间：空间不足时改用另一侧，任何一侧都放不下就取较大的一侧。
+			// 下方展开时上边缘是可以被拖动的（triggerBottom 里已经带上拖动偏移），
+			// 可用高度按“上边缘到视口底部”算，面板才不会从下面溢出去。
+			const spaceAbove = Math.max(0, (input.triggerTop ?? viewportHeight) - margin);
+			const preferAbove = input.preferAbove ?? ((input.triggerTop ?? viewportHeight) >= viewportHeight / 2);
+			const top = preferAbove ? null : Math.max(margin, (input.triggerBottom ?? 0) + margin);
+			const spaceBelow = Math.max(0, viewportHeight - margin - (top ?? viewportHeight));
+			const space = preferAbove ? spaceAbove : spaceBelow;
+			const maxHeight = Math.max(120, Math.min(limits.heightMax, space));
+			const height = input.height === null || input.height === undefined
+				? null
+				: clampNumber(input.height, Math.min(limits.heightMin, maxHeight), maxHeight);
+			return {
+				railWidth: rail,
+				paneWidth: pane,
+				width,
+				left,
+				height,
+				maxHeight,
+				// 上方展开时底边钉住触发按钮上沿（高度增加只向上长）；下方展开时顶边钉住
+				// （drag 偏移由 triggerBottom 带入，从而上边框也能跟手，底边位置保持不变）。
+				top,
+				bottom: preferAbove ? viewportHeight - (input.triggerTop ?? viewportHeight) + margin : null,
+			};
 		};
 		// 目录顺序 + 记忆顺序 = 左侧实际顺序：记忆里还存在的供应商按记忆排序，
 		// 目录里新出现的（或记忆里已删除的）按目录顺序接在后面。
@@ -480,14 +666,22 @@ window.__ModuleLoader__.load({
 					const [optimistic, setOptimistic] = useState(null);
 					const [busy, setBusy] = useState(false);
 					const [error, setError] = useState(null);
-					const [pos, setPos] = useState(null);
+					// 面板锚点：只记触发按钮的位置与展开方向；尺寸与坐标由 resolvePanelBox 现算。
+					const [anchor, setAnchor] = useState(null);
+					const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
+					// size = 用户拖出来的尺寸；某一维为 null 表示还没拖过
+					// （宽走 RAIL_WIDTH/PANE_WIDTH 默认值，高走内容自适应）。
+					const [size, setSize] = useState({ left: null, railWidth: null, paneWidth: null, height: null, shift: 0 });
+					// hoverZone = 已“武装”的热区（光标与提示线已出现）；resizingZone = 正在拖的热区。
+					const [hoverZone, setHoverZone] = useState(null);
+					const [resizingZone, setResizingZone] = useState(null);
 					// dragIndex = 拖动中的预览档位；dragging = 指针真的在滑条上移动过。
 					// 二者分开：只点一下（没移动）时拖拽态不成立，颜色条才能平滑地
 					// 过渡一次；真的拖动时关掉过渡，指针到哪画到哪。
 					const [dragIndex, setDragIndex] = useState(null);
 					const [dragging, setDragging] = useState(false);
 					// 偏好：从 Host 侧存储读入（供应商顺序 + 按模型记的档位）。
-					const [pickerState, setPickerState] = useState({ providerOrder: [], efforts: [] });
+					const [pickerState, setPickerState] = useState({ layout: null, providerOrder: [], efforts: [] });
 					// 供应商拖动排序：dragId = 正在拖的那一家；liveOrder = 拖动中的
 					// 临时顺序（松手才落盘，中途取消就丢弃预览）。
 					const [dragId, setDragId] = useState(null);
@@ -498,6 +692,14 @@ window.__ModuleLoader__.load({
 					const layerRef = useRef(null);
 					const trackRef = useRef(null);
 					const railRef = useRef(null);
+					const paneRef = useRef(null);
+					// 本页是否已经拖过尺寸：拖过之后，重新打开时读回来的旧布局不再覆盖当前值。
+					const sizeTouchedRef = useRef(false);
+					// 缩放的按下候选：{ zone, startX, startY, base, active }；未超阈值时只是普通点击。
+					const resizeRef = useRef(null);
+					// 悬停候选：{ zone, since, x, y }；用于“静止够久才武装”的判定。
+					const hoverRef = useRef(null);
+					const hoverTimerRef = useRef(null);
 					// 拖动排序时记录指针 id 与拖动中的顺序快照；松手时用它判断是否有变化。
 					const dragRef = useRef({ pointerId: null, order: null, start: null });
 
@@ -598,6 +800,21 @@ window.__ModuleLoader__.load({
 
 					// 首帧就要显示当前模型名，所以挂载即拉一次；每次打开面板再拉一次，
 					// 让供应商/模型列表跟上宿主侧的变化（宿主有缓存，代价很小）。
+					// 读回来的偏好里也带着尺寸：只有本页还没拖过尺寸时才套用。
+					const applyLoadedState = useCallback((value) => {
+						setPickerState(value);
+						if (sizeTouchedRef.current) return;
+						// 只套用宽高；水平偏移是本次会话里被拖出来的，不持久化。
+						if (value.layout !== null) {
+							setSize((previous) => ({
+								...previous,
+								railWidth: value.layout.railWidth,
+								paneWidth: value.layout.paneWidth,
+								height: value.layout.height,
+							}));
+						}
+					}, []);
+
 					useEffect(() => { loadCatalog(); }, [loadCatalog]);
 					useEffect(() => { if (open) loadCatalog(); }, [open, loadCatalog]);
 
@@ -606,38 +823,38 @@ window.__ModuleLoader__.load({
 					useEffect(() => {
 						let alive = true;
 						readPickerState()
-							.then((value) => { if (alive) setPickerState(value); })
+							.then((value) => { if (alive) applyLoadedState(value); })
 							.catch(() => { /* 存储不可用时保持刚打开时的空偏好 */ });
 						return () => { alive = false; };
-					}, []);
+					}, [applyLoadedState]);
+
 					useEffect(() => {
 						if (!open) return;
 						readPickerState()
-							.then((value) => setPickerState(value))
+							.then((value) => applyLoadedState(value))
 							.catch(() => { /* 同上 */ });
-					}, [open]);
+					}, [open, applyLoadedState]);
 
 					// 宿主投影追上来之后丢掉本地乐观值，避免它盖住之后的外部切换。
 					useEffect(() => {
 						if (optimistic !== null && sameRoute(projected, optimistic)) setOptimistic(null);
 					}, [projected, optimistic]);
 
-					// 定位：优先在触发按钮上方展开，上方空间不足时翻到下方。
-					// 在绘制前算好，避免先出现再跳动。
+					// 定位：优先在触发按钮上方展开，上方放不下最小高度时翻到下方。
+					// 这里只记锚点；尺寸变化时坐标由 resolvePanelBox 现算，面板不会被拖出视口。
 					useLayoutEffect(() => {
-						if (!open) { setPos(null); return; }
+						if (!open) { setAnchor(null); return; }
 						const measure = () => {
-							const anchor = triggerRef.current;
-							if (anchor === null) return;
-							const rect = anchor.getBoundingClientRect();
-							const width = Math.min(RAIL_WIDTH + GAP + PANE_WIDTH, window.innerWidth - 16);
-							const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
-							const above = rect.top - 8;
-							if (above >= 240) {
-								setPos({ left, width, bottom: window.innerHeight - rect.top + 8, maxHeight: Math.min(PANEL_MAX_HEIGHT, above) });
-							} else {
-								setPos({ left, width, top: rect.bottom + 8, maxHeight: PANEL_MAX_HEIGHT });
-							}
+							const trigger = triggerRef.current;
+							if (trigger === null) return;
+							const rect = trigger.getBoundingClientRect();
+							setViewport({ width: window.innerWidth, height: window.innerHeight });
+							setAnchor({
+								left: rect.left,
+								triggerTop: rect.top,
+								triggerBottom: rect.bottom,
+								preferAbove: rect.top - PANEL_LIMITS.margin >= PANEL_LIMITS.heightMin,
+							});
 						};
 						measure();
 						window.addEventListener('resize', measure);
@@ -648,6 +865,230 @@ window.__ModuleLoader__.load({
 						};
 					}, [open]);
 
+					// 实际尺寸与坐标：用户尺寸先过钳制、再按锚点落位。渲染与拖动共用这一个真值。
+					const box = anchor === null ? null : resolvePanelBox({
+						railWidth: size.railWidth ?? RAIL_WIDTH,
+						paneWidth: size.paneWidth ?? PANE_WIDTH,
+						height: size.height,
+						gap: GAP,
+						viewportWidth: viewport.width,
+						viewportHeight: viewport.height,
+						// 供应商栏左边框被拖过后，面板整体跟着平移；否则仍钉在触发按钮左侧。
+						triggerLeft: size.left ?? anchor.left,
+						triggerTop: anchor.triggerTop,
+						// 下方展开时上边缘可被拖动：偏移只影响“上边缘到视口底部”的可用高度。
+						triggerBottom: anchor.triggerBottom + (anchor.preferAbove ? 0 : size.shift),
+						preferAbove: anchor.preferAbove,
+					});
+
+					// 缩放热区判定以真实 DOM 矩形为准（纯函数 resolveHitZone 负责具体判定）。
+					const zoneAt = useCallback((event) => {
+						const rail = railRef.current;
+						const pane = paneRef.current;
+						if (rail === null || pane === null) return null;
+						const railRect = rail.getBoundingClientRect();
+						const paneRect = pane.getBoundingClientRect();
+						return resolveHitZone(
+							{ x: event.clientX, y: event.clientY },
+							{
+								rail: { left: railRect.left, top: railRect.top, width: railRect.width, height: railRect.height },
+								pane: { left: paneRect.left, top: paneRect.top, width: paneRect.width, height: paneRect.height },
+							},
+						);
+					}, []);
+
+					const clearHoverTimer = useCallback(() => {
+						if (hoverTimerRef.current !== null) {
+							window.clearTimeout(hoverTimerRef.current);
+							hoverTimerRef.current = null;
+						}
+					}, []);
+					const disarmHover = useCallback(() => {
+						clearHoverTimer();
+						hoverRef.current = null;
+						// 值没变时 React 会跳过更新，所以指针在面板里移动不会每帧重渲染。
+						setHoverZone((previous) => (previous === null ? previous : null));
+					}, [clearHoverTimer]);
+
+					// 悬停武装：指针在热区内“静止”够 hoverDelayMs 才切光标。
+					// 移动超过 hoverMoveTolerance 会重新计时，所以快速划过边框既不改光标，也不进入拖动。
+					const scheduleArm = useCallback(() => {
+						clearHoverTimer();
+						const arm = () => {
+							hoverTimerRef.current = null;
+							const state = hoverRef.current;
+							if (state === null) return;
+							const now = Date.now();
+							if (shouldArmHover(state, now)) {
+								setHoverZone(state.zone);
+								return;
+							}
+							// 计时器到点时指针刚微调过（窗口被重置）：补一次剩余等待，别让热区“卡死”。
+							hoverTimerRef.current = window.setTimeout(
+								arm,
+								Math.max(16, state.since + PANEL_LIMITS.hoverDelayMs - now),
+							);
+						};
+						hoverTimerRef.current = window.setTimeout(arm, PANEL_LIMITS.hoverDelayMs);
+					}, [clearHoverTimer]);
+					const trackHover = useCallback((event) => {
+						if (resizeRef.current !== null) return; // 拖动中由拖动态自己管光标
+						const zone = zoneAt(event);
+						if (zone === null) { disarmHover(); return; }
+						const candidate = hoverRef.current;
+						if (candidate === null || candidate.zone !== zone) {
+							hoverRef.current = { zone, since: Date.now(), x: event.clientX, y: event.clientY };
+							setHoverZone((previous) => (previous === null ? previous : null));
+							scheduleArm();
+							return;
+						}
+						if (hoverNeedsRestart(candidate, { x: event.clientX, y: event.clientY })) {
+							candidate.since = Date.now();
+							candidate.x = event.clientX;
+							candidate.y = event.clientY;
+							setHoverZone((previous) => (previous === null ? previous : null));
+							scheduleArm();
+						}
+					}, [disarmHover, zoneAt, scheduleArm]);
+
+					// 按在热区上：只记一个候选，指针移动超过阈值才真正开始缩放；
+					// 没移动的单击不改变任何尺寸（也不会把面板关掉）。
+					const beginResize = useCallback((event) => {
+						if (event.button !== undefined && event.button !== 0) return;
+						// 保险：排序手柄所在的左上角永远不参与缩放判定，排序手势不受影响。
+						if (event.target instanceof Element && event.target.closest('.dsh-mp-handle') !== null) return;
+						const zone = zoneAt(event);
+						if (zone === null) return;
+						const rail = railRef.current;
+						const pane = paneRef.current;
+						if (rail === null || pane === null) return;
+						const railRect = rail.getBoundingClientRect();
+						const paneRect = pane.getBoundingClientRect();
+						const layerRect = layerRef.current === null ? null : layerRef.current.getBoundingClientRect();
+						event.preventDefault();
+						event.stopPropagation();
+						disarmHover();
+						resizeRef.current = {
+							zone,
+							pointerId: event.pointerId,
+							startX: event.clientX,
+							startY: event.clientY,
+							base: {
+								left: box === null ? 0 : box.left,
+								railWidth: railRect.width,
+								paneWidth: paneRect.width,
+								// 高度取当前实际高度：内容自适应的面板也能从“现在这么高”开始拖。
+								height: layerRect === null ? PANEL_LIMITS.heightMin : layerRect.height,
+							},
+							// 用户已保存的高度（null = 还没定高）；只拖宽度的手势要原样带回去。
+							storedHeight: size.height,
+							// 下方展开时上边缘的既有偏移：拖动量要在这个基础上累加。
+							shift0: size.shift,
+							active: false,
+						};
+					}, [disarmHover, zoneAt, size.height, box]);
+
+					// 拖动：候选/拖动都在窗口级监听，指针移出面板也继续跟手；松手才落地并保存。
+					useEffect(() => {
+						const finishResize = () => {
+							const drag = resizeRef.current;
+							resizeRef.current = null;
+							if (drag === null || !drag.active) return;
+							setResizingZone(null);
+							const delta = clampDragDelta(drag.zone, drag.base, drag.lastDx ?? 0, drag.lastDy ?? 0);
+							const desired = applyResizeDelta(drag.zone, drag.base, delta.dx, delta.dy);
+							const changesHeight = drag.zone === 'top' || drag.zone === 'corner';
+							const shift = changesHeight && anchor?.preferAbove === false ? drag.shift0 + delta.dy : 0;
+							const settled = resolvePanelBox({
+								...desired,
+								gap: GAP,
+								viewportWidth: window.innerWidth,
+								viewportHeight: window.innerHeight,
+								triggerLeft: desired.left,
+								triggerTop: anchor?.triggerTop,
+								triggerBottom: (anchor?.triggerBottom ?? 0) + shift,
+								preferAbove: anchor?.preferAbove,
+							});
+							const layout = {
+								railWidth: settled.railWidth,
+								paneWidth: settled.paneWidth,
+								// 只拖宽度的手势不写高度：保留“未定高/已定高”的原状。
+								height: changesHeight ? settled.height : drag.storedHeight,
+							};
+							setSize((previous) => ({
+								left: settled.left,
+								railWidth: layout.railWidth,
+								paneWidth: layout.paneWidth,
+								height: changesHeight ? settled.height : previous.height,
+								shift,
+							}));
+							// 尺寸落盘失败只影响“重启后还记不记得”，不影响这次拖动本身。
+							void savePickerState({ layout })
+								.then((value) => setPickerState(value))
+								.catch(() => { /* 静默降级为不记忆尺寸 */ });
+						};
+						const move = (event) => {
+							const drag = resizeRef.current;
+							if (drag === null) return;
+							const rawDx = event.clientX - drag.startX;
+							const rawDy = event.clientY - drag.startY;
+							if (!drag.active) {
+								if (!exceedsDragThreshold(rawDx, rawDy)) return;
+								drag.active = true;
+								sizeTouchedRef.current = true;
+								setResizingZone(drag.zone);
+							}
+							const delta = clampDragDelta(drag.zone, drag.base, rawDx, rawDy);
+							drag.lastDx = delta.dx;
+							drag.lastDy = delta.dy;
+							const desired = applyResizeDelta(drag.zone, drag.base, delta.dx, delta.dy);
+							const changesHeight = drag.zone === 'top' || drag.zone === 'corner';
+							// 下方展开时，上边框跟手的做法是“上边缘下移 dy、高度少 dy”，底边不动；
+							// 上方展开时上边缘本来就是高度变化的自然结果，偏移恒为 0。
+							const shift = changesHeight && anchor?.preferAbove === false ? drag.shift0 + delta.dy : 0;
+							const next = resolvePanelBox({
+								...desired,
+								gap: GAP,
+								viewportWidth: window.innerWidth,
+								viewportHeight: window.innerHeight,
+								triggerLeft: desired.left,
+								triggerTop: anchor?.triggerTop,
+								triggerBottom: (anchor?.triggerBottom ?? 0) + shift,
+								preferAbove: anchor?.preferAbove,
+							});
+							setSize((previous) => ({
+								// 左边缘被视口夹住时以夹紧后的坐标为准，边框不会越界。
+								left: next.left,
+								railWidth: next.railWidth,
+								paneWidth: next.paneWidth,
+								// 只拖宽度时保持“还没定高”的状态，不把内容自适应变成固定高度。
+								height: changesHeight ? next.height : previous.height,
+								shift,
+							}));
+						};
+						window.addEventListener('pointermove', move, true);
+						window.addEventListener('pointerup', finishResize, true);
+						window.addEventListener('pointercancel', finishResize, true);
+						// 指针在浏览器窗口外松开（拿不到 pointerup）时，失焦也要把这次拖动收尾。
+						window.addEventListener('blur', finishResize);
+						return () => {
+							window.removeEventListener('pointermove', move, true);
+							window.removeEventListener('pointerup', finishResize, true);
+							window.removeEventListener('pointercancel', finishResize, true);
+							window.removeEventListener('blur', finishResize);
+						};
+					}, [anchor]);
+
+					// 拖动中把光标钉在 body 上：经过任意按钮/文本都不变形，松手恢复。
+					useEffect(() => {
+						if (resizingZone === null) return;
+						const cursor = panelCursor(resizingZone);
+						if (cursor === undefined) return;
+						const previous = document.body.style.cursor;
+						document.body.style.cursor = cursor;
+						return () => { document.body.style.cursor = previous; };
+					}, [resizingZone]);
+
 					// 每次打开都把展示的供应商对齐到当前选中项，而不是上次悬停的位置。
 					useEffect(() => {
 						if (!open) return;
@@ -656,7 +1097,19 @@ window.__ModuleLoader__.load({
 						// 面板（重新）打开时不残留上一次的悬停高亮。
 						setLitProvider(null);
 						setLitModel(null);
+						// 上边缘被拖出来的偏移只是本次预览的位置，重新打开回到锚点。
+						setSize((previous) => (previous.shift === 0 ? previous : { ...previous, shift: 0 }));
 					}, [open]);
+
+					// 面板关闭时清掉缩放/悬停的临时态（例如拖动中按 Esc 关掉面板）。
+					useEffect(() => {
+						if (open) return;
+						resizeRef.current = null;
+						clearHoverTimer();
+						hoverRef.current = null;
+						setHoverZone((previous) => (previous === null ? previous : null));
+						setResizingZone((previous) => (previous === null ? previous : null));
+					}, [open, clearHoverTimer]);
 
 					// 指针离开整个面板：所有悬停高亮一起熄灭。
 					// 只清高亮，不动 hovered——右侧展示哪一家仍由 hovered/activeId 决定，
@@ -826,7 +1279,7 @@ window.__ModuleLoader__.load({
 						setLiveOrder(null);
 					};
 					// 拖动中按 Esc 取消这次排序，不落盘。窗口级指针监听作为兜底：
-// 手柄用 setPointerCapture 接管指针，个别环境（或测试里）不支持时仍能拖动。
+					// 手柄用 setPointerCapture 接管指针，个别环境（或测试里）不支持时仍能拖动。
 					useEffect(() => {
 						if (dragId === null) return;
 						const onKeyDown = (event) => {
@@ -909,26 +1362,64 @@ window.__ModuleLoader__.load({
 					const triggerBadgeText = resolveText(currentModel?.badge?.text);
 					const triggerEffort = efforts.length === 0 ? undefined : tierTitle(efforts[settledIndex]);
 
-					const layer = open && pos !== null
+					// 缩放的四个热区：透明薄片，未武装时 pointer-events:none，
+					// 所以“划过边框”不会改光标、也不会抢走内容的点击。
+					const armedZone = resizingZone ?? hoverZone;
+					const resizeGrips = box === null ? [] : [
+						h('div', {
+							key: 'rail-w', className: 'dsh-mp-grip', 'data-zone': 'rail-w',
+							'data-armed': armedZone === 'rail-w' ? 'true' : 'false',
+							style: { left: 0, top: 0, bottom: 0, width: PANEL_LIMITS.hitWidth },
+						}),
+						h('div', {
+							key: 'pane-w', className: 'dsh-mp-grip', 'data-zone': 'pane-w',
+							'data-armed': armedZone === 'pane-w' ? 'true' : 'false',
+							style: { left: box.railWidth + GAP, top: 0, bottom: 0, width: PANEL_LIMITS.hitWidth },
+						}),
+						h('div', {
+							key: 'top', className: 'dsh-mp-grip', 'data-zone': 'top',
+							'data-armed': armedZone === 'top' ? 'true' : 'false',
+							style: { left: 0, right: 0, top: 0, height: PANEL_LIMITS.hitWidth },
+						}),
+						h('div', {
+							key: 'corner', className: 'dsh-mp-grip', 'data-zone': 'corner',
+							'data-armed': armedZone === 'corner' ? 'true' : 'false',
+							style: { left: 0, top: 0, width: PANEL_LIMITS.corner, height: PANEL_LIMITS.hitWidth },
+						}),
+					];
+
+					const layer = open && anchor !== null && box !== null
 						? ReactDOM.createPortal(
 							h('div', {
 								ref: layerRef,
 								className: 'dsh-mp-layer',
+								'data-sized': box.height === null ? 'false' : 'true',
+								'data-resizing': resizingZone === null ? 'false' : 'true',
 								style: {
-									left: pos.left,
-									width: pos.width,
-									maxHeight: pos.maxHeight,
-									...(pos.top === undefined ? { bottom: pos.bottom } : { top: pos.top }),
+									left: box.left,
+									width: box.width,
+									// 武装/拖动时整层用同一个缩放光标，指针在热区边缘的亚像素位置也不会丢光标。
+									cursor: armedZone === null ? undefined : panelCursor(armedZone),
+									...(box.height === null ? { maxHeight: box.maxHeight } : { height: box.height }),
+									...(box.top === null ? { bottom: box.bottom } : { top: box.top }),
 								},
 								role: 'dialog',
 								'aria-label': t('label.select'),
+								onPointerMove: trackHover,
+								onPointerDown: beginResize,
+								onPointerLeave: disarmHover,
 								// 指针离开整个面板（含两张卡片与中间缝隙）时才熄灭所有
 								// 悬停高亮；在两列之间移动不会触发这里的 mouseleave，
 								// 因为缝隙也在面板内。
 								onMouseLeave: clearLit,
 							},
 								// 一级菜单：供应商。悬停即切换右侧内容。
-								h('div', { ref: railRef, className: 'dsh-mp-card dsh-mp-rail' },
+								h('div', {
+									ref: railRef,
+									className: 'dsh-mp-card dsh-mp-rail',
+									// 宽度走同一套钳制结果；高度由 flex stretch 与右侧共享，没有独立高度可设。
+									style: { width: box.railWidth },
+								},
 									groups.length === 0
 										? h('div', { className: 'dsh-mp-note' },
 											catalog.status === 'error'
@@ -985,7 +1476,11 @@ window.__ModuleLoader__.load({
 										])),
 								),
 								// 二级区域：该供应商的模型列表 + 思考强度。
-								h('div', { className: 'dsh-mp-card dsh-mp-pane' },
+								h('div', {
+									ref: paneRef,
+									className: 'dsh-mp-card dsh-mp-pane',
+									style: { width: box.paneWidth },
+								},
 									activeGroup === undefined
 										? null
 										: [
@@ -1099,6 +1594,10 @@ window.__ModuleLoader__.load({
 											),
 										],
 								),
+								// 热区与尺寸读数（只在拖动中显示）作为层的最后两个子节点。
+								...resizeGrips,
+								resizingZone === null ? null : h('div', { className: 'dsh-mp-size-badge' },
+									`${Math.round(box.railWidth)} × ${Math.round(box.paneWidth)} × ${Math.round(box.height ?? box.maxHeight)}`),
 							),
 							document.body,
 						)

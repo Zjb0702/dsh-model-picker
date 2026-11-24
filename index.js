@@ -26,8 +26,37 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 
 const ROUTE_BASE = '/api/dsh-model-picker'
-// 当前磁盘格式版本。v2 = { version, providerOrder: string[], efforts: [{ provider, model, effort }] }。
-const STATE_VERSION = 2
+// 当前磁盘格式版本。
+// v2 = { version, providerOrder: string[], efforts: [{ provider, model, effort }] }
+// v3 = v2 + { layout: { railWidth, paneWidth, height } | null }（面板缩放尺寸；null = 默认/自适应）
+const STATE_VERSION = 3
+
+// 缩放尺寸的边界值，与浏览器半边 PANEL_LIMITS 保持一致：Host 只做最后一道夹紧。
+const LAYOUT_LIMITS = {
+  railMin: 120, railMax: 420,
+  paneMin: 220, paneMax: 760,
+  heightMin: 180, heightMax: 660,
+}
+
+const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value))
+
+/**
+ * 归一化尺寸布局：缺失返回 null；任何一项非法都单独置 null（表示沿用默认/自适应），
+ * 合法值按边界夹紧并取整。三个字段都为 null 等价于没有记录。
+ */
+function sanitizeLayout(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return null
+  const pick = (raw, min, max) => (typeof raw === 'number' && Number.isFinite(raw)
+    ? Math.round(clampNumber(raw, min, max))
+    : null)
+  const layout = {
+    railWidth: pick(input.railWidth, LAYOUT_LIMITS.railMin, LAYOUT_LIMITS.railMax),
+    paneWidth: pick(input.paneWidth, LAYOUT_LIMITS.paneMin, LAYOUT_LIMITS.paneMax),
+    height: pick(input.height, LAYOUT_LIMITS.heightMin, LAYOUT_LIMITS.heightMax),
+  }
+  if (layout.railWidth === null && layout.paneWidth === null && layout.height === null) return null
+  return layout
+}
 const MAX_PROVIDERS = 200
 const MAX_EFFORTS = 1000
 const MAX_ID_LENGTH = 200
@@ -129,11 +158,13 @@ function normalizeEfforts(input) {
  *   - 数组形式的记录项必须是字符串字段，非法项直接跳过而不是让整份文件失效。
  */
 export function normalizeState(raw) {
-  const state = { version: STATE_VERSION, providerOrder: [], efforts: [] }
+  const state = { version: STATE_VERSION, providerOrder: [], efforts: [], layout: null }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return state
   const order = raw.providerOrder ?? raw.order ?? raw.providers
   if (Array.isArray(order)) state.providerOrder = sanitizeOrder(order)
   state.efforts = normalizeEfforts(raw.efforts ?? raw.reasoningEfforts ?? raw.effortByModel ?? raw.effort)
+  // v3 新字段：也接受 panel / size 两种旧别名；旧文件没有该字段时保持 null。
+  state.layout = sanitizeLayout(raw.layout ?? raw.panel ?? raw.size ?? null)
   return state
 }
 
@@ -142,6 +173,7 @@ function cloneState(state) {
     version: state.version,
     providerOrder: [...state.providerOrder],
     efforts: state.efforts.map((record) => ({ ...record })),
+    layout: state.layout === null ? null : { ...state.layout },
   }
 }
 
@@ -159,6 +191,10 @@ function applyPatch(state, patch) {
   }
   if (patch.effort !== undefined) {
     upsertEffort(state, sanitizeEffortRecord(patch.effort))
+  }
+  // 尺寸：显式 null 表示清除（回到默认/自适应）；非法值同样归为 null，不会污染已有配置。
+  if (patch.layout !== undefined) {
+    state.layout = sanitizeLayout(patch.layout)
   }
 }
 
@@ -350,4 +386,4 @@ export function apply(ctx) {
 }
 
 /** 测试接缝：不依赖 Cordis 图也能构造仓库、注册路由、跑归一化。 */
-export const __internals = { createStateStore, makeRoutes, normalizeState, ROUTE_BASE, STATE_VERSION }
+export const __internals = { createStateStore, makeRoutes, normalizeState, sanitizeLayout, LAYOUT_LIMITS, ROUTE_BASE, STATE_VERSION }

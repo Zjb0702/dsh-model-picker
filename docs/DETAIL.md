@@ -95,6 +95,52 @@
   拖动不会误触发选择。
 - 目录里新出现的供应商排在已记住顺序的后面，已删除的供应商自动跳过。
 
+## 面板缩放
+
+四个热区（`rail-w` / `pane-w` / `top` / `corner`）判定全部抽成纯函数：
+
+- `resolveHitZone(point, boxes)`：以两栏的真实 `getBoundingClientRect()` 为输入，先判左上角
+  （横向 12px 内、上边缘 5px 内），再判上边框（横跨两栏），再判两条左竖边（宽 5px、限卡片
+  高度内）；间隙、栏内内容一律返回 `null`，所以点选、排序手柄、模型行点击都不会被热区抢走。
+  供应商排序手柄还额外在 `beginResize` 里被 `closest('.dsh-mp-handle')` 排除。
+- `shouldArmHover` / `hoverNeedsRestart`：指针在热区内静止满 `hoverDelayMs = 140ms`
+  才武装（`data-armed` → 光标 + 提示线）；等待期间位移超过 `hoverMoveTolerance = 4px`
+  就重新计时，所以“扫过边框”不会亮。热区薄片默认 `pointer-events: none`，未武装时对指针
+  完全透明。
+- `exceedsDragThreshold`：按下后位移超过 `dragThreshold = 3px` 才真正进入拖动；没超过只是
+  一次普通点击，不改尺寸。拖动在 `window` 的 capture 阶段监听 `pointermove/pointerup`，
+  指针拖出面板也继续跟手，松手才 `applyResizeDelta` → `resolvePanelBox` → 写入并保存。
+- `applyResizeDelta(zone, base, dx, dy)`：`railW/corner` 让 `left += dx`（面板左边缘跟手）
+  且供应商栏宽度反向变化；`paneW` 让供应商栏宽度补偿 `dx`、模型栏宽度反向变化（总宽不变，
+  分栏边界跟手）；`top/corner` 只改唯一的 `height`。**高度只有这一个入口**，两栏由
+  `.dsh-mp-layer` 的 flex `stretch` 共享高度，结构上不可能一栏高、一栏低。
+- `resolvePanelBox(input)`：把期望尺寸收敛成实际渲染值。下方展开时上边缘还能被拖动：组件把
+  “上边缘偏移”加到 `triggerBottom` 上传进来，于是 `top = triggerBottom + margin` 跟着走、可用
+  高度按到视口底部的距离算，底边保持原地；这个偏移只是本次预览的位置（不落盘），重新打开面板
+  会回到贴住输入框的锚点。供应商栏 120–420、模型栏 220–760、
+  高度 180–660；总宽超过 `viewportWidth - 16` 时先收模型栏、仍不够再收供应商栏；左边缘夹在
+  `8 .. viewportWidth - width - 8`；展开侧可用高度决定 `maxHeight`（下限 120），面板上下
+  都不会越出视口。
+
+尺寸持久化（`state.json` v3）：
+
+```json
+{
+  "version": 3,
+  "providerOrder": ["provider-a", "provider-b"],
+  "efforts": [{ "provider": "provider-a", "model": "model-x", "effort": "high" }],
+  "layout": { "railWidth": 220, "paneWidth": 380, "height": 320 }
+}
+```
+
+- `layout` 三个字段都可为 `null`（该项沿用默认/自适应），整体为 `null` 表示没拖过；
+- Host 侧 `sanitizeLayout` 逐字段校验并夹到同一套边界内，三个字段都非法时归 `null`，
+  不会让坏值落盘；
+- 兼容更早的格式：`layout` 缺失 → `null`；也接受 `panel` / `size` 两种别名；`providerOrder`
+  与 `efforts` 的旧格式迁移逻辑不变，新增字段不会导致原有配置被丢弃；
+- `PUT /state/save` 携带 `{ layout }` 合并写入；客户端保存失败只影响“重启后还记不记得尺寸”，
+  不影响这次拖动与选择模型。
+
 ## 偏好存储
 
 偏好写在 `$DSH_HOME/model-picker/state.json`（默认 `~/.dsh/model-picker/state.json`），
@@ -102,9 +148,10 @@
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "providerOrder": ["provider-a", "provider-b"],
-  "efforts": [{ "provider": "provider-a", "model": "model-x", "effort": "high" }]
+  "efforts": [{ "provider": "provider-a", "model": "model-x", "effort": "high" }],
+  "layout": { "railWidth": 220, "paneWidth": 380, "height": 320 }
 }
 ```
 
