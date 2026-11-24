@@ -107,6 +107,11 @@
   才武装（`data-armed` → 光标 + 提示线）；等待期间位移超过 `hoverMoveTolerance = 4px`
   就重新计时，所以“扫过边框”不会亮。热区薄片默认 `pointer-events: none`，未武装时对指针
   完全透明。
+- `resolveArmedZone(pressingZone, resizingZone, hoverZone)`：当前该亮哪个热区，优先级
+  “按下中 > 拖动中 > 悬停武装”。按下时 `pressingZone` 直接接管，**不从悬停态先清空再重建**，
+  所以“进入热区 → 按下 → 拖动 → 松手”全程不会闪断；松手时 `settleArmedZone` 先清
+  `pressingZone`，再按 `zoneAt(event)` 判断指针是否还在热区内——在就保持武装（点击边框、
+  拖完边框后指针停在边上都不会闪），不在就 `disarmHover()` 按既有规则收回。
 - `exceedsDragThreshold`：按下后位移超过 `dragThreshold = 3px` 才真正进入拖动；没超过只是
   一次普通点击，不改尺寸。拖动在 `window` 的 capture 阶段监听 `pointermove/pointerup`，
   指针拖出面板也继续跟手，松手才 `applyResizeDelta` → `resolvePanelBox` → 写入并保存。

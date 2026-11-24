@@ -16,7 +16,8 @@ return {
   PANEL_LIMITS, clampNumber, findRememberedEffort, supportsEffort, normalizeLayout,
   normalizePickerState, rememberEffortIn, orderedGroupsOf, resolveEffortSelection,
   resolveSwitchEffort, moveProviderId, resolveHitZone, panelCursor, shouldArmHover,
-  hoverNeedsRestart, exceedsDragThreshold, clampDragDelta, applyResizeDelta, resolvePanelBox,
+  hoverNeedsRestart, exceedsDragThreshold, resolveArmedZone, clampDragDelta, applyResizeDelta,
+  resolvePanelBox,
 };
 `)(196, 340, 6)
 
@@ -24,7 +25,8 @@ const {
   PANEL_LIMITS, clampNumber, findRememberedEffort, supportsEffort, normalizeLayout,
   normalizePickerState, rememberEffortIn, orderedGroupsOf, resolveEffortSelection,
   resolveSwitchEffort, moveProviderId, resolveHitZone, panelCursor, shouldArmHover,
-  hoverNeedsRestart, exceedsDragThreshold, clampDragDelta, applyResizeDelta, resolvePanelBox,
+  hoverNeedsRestart, exceedsDragThreshold, resolveArmedZone, clampDragDelta, applyResizeDelta,
+  resolvePanelBox,
 } = utils
 
 const model = (id, efforts, defaultEffort) => ({
@@ -221,6 +223,20 @@ test('panelCursor / shouldArmHover / hoverNeedsRestart / exceedsDragThreshold', 
   assert.equal(exceedsDragThreshold(0, 2), false)
   assert.equal(exceedsDragThreshold(3, 0), true)
   assert.equal(exceedsDragThreshold(0, -3), true)
+})
+
+test('resolveArmedZone：按下后武装态由按下态接管，全程不断档', () => {
+  // 悬停武装后按下：hoverZone 仍是同一个，按下态在场，提示继续
+  assert.equal(resolveArmedZone('rail-w', null, 'rail-w'), 'rail-w')
+  // 点击（还没到拖动阈值）时可能没有悬停武装：按下态自己顶上，提示不消失
+  assert.equal(resolveArmedZone('pane-w', null, null), 'pane-w')
+  // 按下 → 进入拖动：拖动态接住，仍然连续
+  assert.equal(resolveArmedZone('rail-w', 'rail-w', null), 'rail-w')
+  // 松手：按下态与拖动态都清空，只剩悬停态决定是否继续武装
+  assert.equal(resolveArmedZone(null, null, 'top'), 'top')
+  // 松手后指针已离开热区：全部为空，提示收回
+  assert.equal(resolveArmedZone(null, null, null), null)
+  assert.equal(resolveArmedZone(undefined, undefined, undefined), null)
 })
 
 test('applyResizeDelta：边框跟手、分栏补偿，且只有单一 height', () => {

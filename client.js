@@ -431,6 +431,13 @@ window.__ModuleLoader__.load({
 			&& Math.max(Math.abs(point.x - state.x), Math.abs(point.y - state.y)) > limits.hoverMoveTolerance;
 		// 按下后是否够格进入拖动：没超过阈值只算一次普通点击，不改尺寸。
 		const exceedsDragThreshold = (dx, dy, limits = PANEL_LIMITS) => Math.hypot(dx, dy) >= limits.dragThreshold;
+		// 当前该“武装”哪个热区（显示光标 + 提示线）。
+		// 优先级：按下中 > 拖动中 > 悬停武装。按下时由 pressingZone 直接接管，
+		// 不从悬停态先清空再重建，所以“进入热区 → 按下 → 拖动 → 松手”全程连续。
+		const resolveArmedZone = (pressingZone, resizingZone, hoverZone) => pressingZone
+			?? resizingZone
+			?? hoverZone
+			?? null;
 		// 拖动量先收敛到“边框还能跟手”的范围：被拖的边框到达上下限时，
 		// 多余位移直接丢掉，而不是让尺寸继续变、边框却停在原处。
 		const clampDragDelta = (zone, base, dx, dy) => {
@@ -672,8 +679,11 @@ window.__ModuleLoader__.load({
 					// size = 用户拖出来的尺寸；某一维为 null 表示还没拖过
 					// （宽走 RAIL_WIDTH/PANE_WIDTH 默认值，高走内容自适应）。
 					const [size, setSize] = useState({ left: null, railWidth: null, paneWidth: null, height: null, shift: 0 });
-					// hoverZone = 已“武装”的热区（光标与提示线已出现）；resizingZone = 正在拖的热区。
+					// hoverZone = 悬停武装的热区（光标与提示线已出现）；pressingZone = 鼠标按住的
+					// 热区（按下即接管提示，未到拖动阈值也算）；resizingZone = 真正在拖的热区。
+					// 三者合成一个“当前武装态”，避免按下瞬间把提示清空又重建（会闪一下）。
 					const [hoverZone, setHoverZone] = useState(null);
+					const [pressingZone, setPressingZone] = useState(null);
 					const [resizingZone, setResizingZone] = useState(null);
 					// dragIndex = 拖动中的预览档位；dragging = 指针真的在滑条上移动过。
 					// 二者分开：只点一下（没移动）时拖拽态不成立，颜色条才能平滑地
@@ -967,7 +977,10 @@ window.__ModuleLoader__.load({
 						const layerRect = layerRef.current === null ? null : layerRef.current.getBoundingClientRect();
 						event.preventDefault();
 						event.stopPropagation();
-						disarmHover();
+						// 提示不在这里清：按下态直接接管武装态（clearHoverTimer 只停掉尚未到点的计时器，
+						// hoverZone 留着，等松手时再按指针是否还在热区里决定收回还是保持）。
+						clearHoverTimer();
+						setPressingZone(zone);
 						resizeRef.current = {
 							zone,
 							pointerId: event.pointerId,
@@ -986,13 +999,29 @@ window.__ModuleLoader__.load({
 							shift0: size.shift,
 							active: false,
 						};
-					}, [disarmHover, zoneAt, size.height, box]);
+					}, [clearHoverTimer, zoneAt, size.height, box]);
 
 					// 拖动：候选/拖动都在窗口级监听，指针移出面板也继续跟手；松手才落地并保存。
 					useEffect(() => {
-						const finishResize = () => {
+						// 松手：把“按下态”交回悬停态。指针还在热区里就保持武装（不闪一下），
+						// 已经离开才按既有规则收回；之后才判断这次是否真的拖动过。
+						const settleArmedZone = (event) => {
+							setPressingZone(null);
+							const inside = event !== undefined
+								&& event !== null
+								&& typeof event.clientX === 'number'
+								&& typeof event.clientY === 'number';
+							if (!inside) { disarmHover(); return; }
+							const zone = zoneAt(event);
+							if (zone === null) { disarmHover(); return; }
+							// 指针原地不动：把候选重置成“刚进入”，后续若再移动仍按 140ms 规则重新武装。
+							hoverRef.current = { zone, since: Date.now(), x: event.clientX, y: event.clientY };
+							setHoverZone((previous) => (previous === zone ? previous : zone));
+						};
+						const finishResize = (event) => {
 							const drag = resizeRef.current;
 							resizeRef.current = null;
+							settleArmedZone(event);
 							if (drag === null || !drag.active) return;
 							setResizingZone(null);
 							const delta = clampDragDelta(drag.zone, drag.base, drag.lastDx ?? 0, drag.lastDy ?? 0);
@@ -1077,7 +1106,7 @@ window.__ModuleLoader__.load({
 							window.removeEventListener('pointercancel', finishResize, true);
 							window.removeEventListener('blur', finishResize);
 						};
-					}, [anchor]);
+					}, [anchor, zoneAt, disarmHover]);
 
 					// 拖动中把光标钉在 body 上：经过任意按钮/文本都不变形，松手恢复。
 					useEffect(() => {
@@ -1108,6 +1137,7 @@ window.__ModuleLoader__.load({
 						clearHoverTimer();
 						hoverRef.current = null;
 						setHoverZone((previous) => (previous === null ? previous : null));
+						setPressingZone((previous) => (previous === null ? previous : null));
 						setResizingZone((previous) => (previous === null ? previous : null));
 					}, [open, clearHoverTimer]);
 
@@ -1364,7 +1394,7 @@ window.__ModuleLoader__.load({
 
 					// 缩放的四个热区：透明薄片，未武装时 pointer-events:none，
 					// 所以“划过边框”不会改光标、也不会抢走内容的点击。
-					const armedZone = resizingZone ?? hoverZone;
+					const armedZone = resolveArmedZone(pressingZone, resizingZone, hoverZone);
 					const resizeGrips = box === null ? [] : [
 						h('div', {
 							key: 'rail-w', className: 'dsh-mp-grip', 'data-zone': 'rail-w',
