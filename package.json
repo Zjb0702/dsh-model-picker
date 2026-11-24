@@ -38,5 +38,8 @@
       ]
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/host-state.test.mjs test/client-prefs.test.mjs"
+  }
 }

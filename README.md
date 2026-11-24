@@ -8,8 +8,9 @@ zcode 风格的两级模型选择器，替换输入框工具行里的模型选�
 | --- | --- |
 | `package.json` | 包清单：声明 `dsh.bundle.patch` 与 `dsh.client`（浏览器半边入口）。 |
 | `cordis.patch.yml` | 组合补丁：把本包挂进 Web 组合。 |
-| `index.js` | Host 半边，空实现（纯 UI 插件，数据走 `ctx.remote.session`）。 |
-| `client.js` | 浏览器半边：选择器组件、样式、文案、座位注册。 |
+| `index.js` | Host 半边：只提供偏好存储（按模型记档位、供应商顺序）的同源回环路由。 |
+| `client.js` | 浏览器半边：选择器组件、样式、文案、座位注册、拖动排序。 |
+| `test/` | 偏好存储与纯函数测试（`node --test test/host-state.test.mjs test/client-prefs.test.mjs`）。 |
 | `locale/zh.json`、`locale/en.json` | 插件管理页里的标题与描述。 |
 | `docs/DETAIL.md` | 插件详情页。 |
 | `icon.svg` | 插件图标。 |
@@ -35,6 +36,18 @@ plugin_manager({ action: "install_bundle", target: "D:\\Documents\\deepseek-harn
 
 供应商、模型、徽标（如「视觉」）、思考强度档位全部来自宿主的模型目录，
 插件里没有任何硬编码的名字；要加供应商或模型，在 DSH 的模型/凭据设置里改即可。
+
+## 偏好记忆与供应商排序
+
+- **档位记忆**：思考强度按「供应商 + 模型」记住你上次显式选中的档位。在某个模型上选「高」，
+  切到别的模型再切回来，仍然是「高」；没被选过档位的模型沿用目录默认值。档位若已不在该
+  模型声明的档位集合里，自动回落到默认值。
+- **供应商顺序**：每个供应商行左侧有一个小圆点手柄（⋮⋮），按住手柄拖动即可调整顺序；
+  松手才落盘，拖动中按 Esc 取消。只允许通过手柄拖动，点供应商行本身仍是原来的选择行为。
+- **持久化位置**：`$DSH_HOME/model-picker/state.json`（默认 `~/.dsh/model-picker/state.json`），
+  由 Host 半边通过同源回环路由读写，原子写入。页面刷新、插件重载、App 重启后都有效；
+  旧格式文件读取时会自动迁移，损坏的文件会先留档再重建。存储不可用时静默降级为「不记忆」，
+  不影响选择模型本身。
 
 ## 座位
 

@@ -41,6 +41,10 @@ window.__ModuleLoader__.load({
 			max: 'Max',
 		};
 		const PANEL_MAX_HEIGHT = 420;
+		// 偏好存储（Host 半边提供）：按「供应商 + 模型」记忆思考档位，
+		// 并记住左侧供应商栏的顺序。页面重载、App 重启后仍在。
+		const STATE_URL = '/api/dsh-model-picker/state';
+		const STATE_SAVE_URL = '/api/dsh-model-picker/state/save';
 
 		const CSS = `
 .dsh-mp-root { display: inline-flex; min-width: 0; }
@@ -73,6 +77,27 @@ window.__ModuleLoader__.load({
 	box-shadow: 0 10px 30px rgba(0, 0, 0, .22);
 }
 .dsh-mp-rail { flex: none; width: ${RAIL_WIDTH}px; padding: 6px; overflow-y: auto; }
+/* 左侧每一行 = 拖动手柄 + 供应商按钮。点供应商按钮仍是原来的“切到这家”，
+   只有按在左侧小按钮上并拖动才进入排序；手柄本身不选中任何东西。 */
+.dsh-mp-rail-row { display: flex; align-items: center; gap: 2px; border-radius: 8px; }
+.dsh-mp-rail-row > .dsh-mp-row { flex: 1 1 auto; width: auto; min-width: 0; }
+.dsh-mp-rail-row[data-dragging='true'] .dsh-mp-row,
+.dsh-mp-rail-row[data-dragging='true'] .dsh-mp-row[data-lit='true'] {
+	background: var(--dsw-alias-interactive-bg-active);
+	color: var(--dsw-alias-label-primary);
+}
+.dsh-mp-handle {
+	flex: none; width: 16px; height: 26px; padding: 0; border: 0; border-radius: 6px;
+	background: transparent; color: var(--dsw-alias-label-tertiary);
+	display: inline-flex; align-items: center; justify-content: center;
+	cursor: grab; touch-action: none;
+}
+.dsh-mp-handle:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-secondary); }
+.dsh-mp-handle:active,
+.dsh-mp-rail-row[data-dragging='true'] .dsh-mp-handle {
+	cursor: grabbing; background: var(--dsw-alias-state-business-tertiary); color: var(--dsw-alias-state-business-primary);
+}
+.dsh-mp-handle:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
 .dsh-mp-pane { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; padding: 6px; overflow: hidden; }
 /* 模型区自己滚动：上方标题与下方思考强度不跟着滚，面板高度也只在
    96~220px 之间变化，不会因为换了个供应商就大幅跳动。 */
@@ -242,11 +267,94 @@ window.__ModuleLoader__.load({
 			h('rect', { key: 'a', x: '2.5', y: '3', width: '11', height: '4', rx: '1.2' }),
 			h('rect', { key: 'b', x: '2.5', y: '9', width: '11', height: '4', rx: '1.2' }),
 		]);
+		// 拖动手柄：两列小圆点（⋮⋮），只有它能把供应商行拖起来。
+		const IconGrip = () => h('svg', {
+			width: 8, height: 12, viewBox: '0 0 8 12', fill: 'currentColor', 'aria-hidden': 'true',
+		}, [2, 6, 10].flatMap((cy) => [2, 6].map((cx) => h('circle', { key: `${cx}-${cy}`, cx, cy, r: 1 }))));
 
 		const effortIndexOf = (efforts, id) => {
 			if (id === undefined) return -1;
 			return efforts.findIndex((effort) => effort.id === id);
 		};
+		// ---- 偏好状态（供应商顺序 + 按模型记住的思考档位） -------------------
+		// #region 偏好状态辅助（纯函数；test/client-prefs.test.mjs 取这一段直接测）
+		// 存储里的 efforts 是 [{provider, model, effort}]；客户端只用两个小工具
+		// 读写它，不假设顺序，也不依赖存储里一定有某条记录。
+		const findRememberedEffort = (state, provider, model) => {
+			if (state === undefined || state === null) return undefined;
+			const record = state.efforts.find((item) => item.provider === provider && item.model === model);
+			return record === undefined ? undefined : record.effort;
+		};
+		// 只有这张模型自己声明的档位才可用：换供应商、模型升级、目录变化
+		// 都可能让记忆里的档位失效，这时回落到目录默认值。
+		const supportsEffort = (model, effortId) => {
+			if (effortId === undefined || model === undefined) return false;
+			const efforts = model.reasoning?.efforts;
+			if (!Array.isArray(efforts)) return false;
+			return efforts.some((effort) => effort.id === effortId);
+		};
+		const normalizePickerState = (value) => ({
+			providerOrder: Array.isArray(value?.providerOrder)
+				? value.providerOrder.filter((id) => typeof id === 'string')
+				: [],
+			efforts: Array.isArray(value?.efforts)
+				? value.efforts.filter((item) => item !== null && typeof item === 'object'
+					&& typeof item.provider === 'string' && typeof item.model === 'string' && typeof item.effort === 'string')
+					.map((item) => ({ provider: item.provider, model: item.model, effort: item.effort }))
+				: [],
+		});
+		const rememberEffortIn = (state, provider, model, effort) => {
+			const rest = state.efforts.filter((item) => !(item.provider === provider && item.model === model));
+			return { ...state, efforts: [...rest, { provider, model, effort }] };
+		};
+		// 滑条显示哪一档、宿主当前实际用哪一档：
+		//   host    = 投影里的档位（若该模型支持）否则目录默认档；
+		//   display = 记忆里的档位（若该模型支持）否则 host。
+		// 两者分开是必要的：重启后投影可能丢档位，而记忆仍在；显示跟记忆走，
+		// “是否需要再提交一次”跟 host 比。
+		const resolveEffortSelection = (selection, model, remembered) => {
+			const defaultEffort = model?.reasoning?.defaultEffort;
+			const host = selection !== null && supportsEffort(model, selection.reasoningEffort)
+				? selection.reasoningEffort
+				: defaultEffort;
+			const display = supportsEffort(model, remembered) ? remembered : host;
+			return { host, display };
+		};
+		// 点某个模型时要提交的档位：同一条路由沿用当前档位；换了模型则优先回填
+		// 这个模型上次记住的档位，没有记忆（或记忆档位失效）才用目录默认值。
+		const resolveSwitchEffort = (selection, providerId, model, remembered) => {
+			const onSameRoute = selection !== null
+				&& selection.provider === providerId && selection.model === model.id;
+			if (onSameRoute) return { onSameRoute, effort: selection.reasoningEffort };
+			return { onSameRoute, effort: supportsEffort(model, remembered) ? remembered : model.reasoning?.defaultEffort };
+		};
+		// 拖动排序的落点：把 dragId 移到 target 之前的目标位置。
+		// target 用“行下标”语义（0..行数），行数表示拖到末尾。
+		const moveProviderId = (order, dragId, target) => {
+			const from = order.indexOf(dragId);
+			if (from === -1) return order;
+			const without = order.filter((id) => id !== dragId);
+			const insertAt = Math.max(0, Math.min(without.length, target > from ? target - 1 : target));
+			if (insertAt === from) return order;
+			return [...without.slice(0, insertAt), dragId, ...without.slice(insertAt)];
+		};
+		// 目录顺序 + 记忆顺序 = 左侧实际顺序：记忆里还存在的供应商按记忆排序，
+		// 目录里新出现的（或记忆里已删除的）按目录顺序接在后面。
+		const orderedGroupsOf = (groups, state) => {
+			const byId = new Map(groups.map((group) => [group.id, group]));
+			const ordered = [];
+			for (const id of state.providerOrder) {
+				const group = byId.get(id);
+				if (group === undefined) continue;
+				ordered.push(group);
+				byId.delete(id);
+			}
+			for (const group of groups) {
+				if (byId.has(group.id)) ordered.push(group);
+			}
+			return ordered;
+		};
+		// #endregion
 		// 同一条路由（供应商 + 模型）即视为“宿主已经追上来了”。思考强度不参与比较：
 		// 宿主回填的投影可能不带 reasoningEffort，若把它算进相等判断，乐观值会一直
 		// 挂着，反而盖住之后从别处发起的切换。
@@ -271,6 +379,7 @@ window.__ModuleLoader__.load({
 						'label.select': '选择模型',
 						'menu.models': '模型',
 						'menu.effort': '思考强度',
+						'handle.title': '拖动调整供应商顺序',
 						// 档位名的中文写法；圆点下方仍用宿主的英文名。
 						'effort.off': '关闭思考',
 						'effort.minimal': '极低',
@@ -289,6 +398,7 @@ window.__ModuleLoader__.load({
 						'label.select': 'Select model',
 						'menu.models': 'Models',
 						'menu.effort': 'Reasoning effort',
+						'handle.title': 'Drag to reorder providers',
 						'effort.off': 'Off',
 						'effort.minimal': 'Minimal',
 						'effort.low': 'Low',
@@ -307,6 +417,28 @@ window.__ModuleLoader__.load({
 				const t = ctx.locale.bind(NS);
 				// remote 面在模块求值期不可读，统一用 thunk 延迟到组件运行时。
 				const sessionFace = () => ctx.remote.session;
+				// 偏好存储走 Host 半边注册的同源回环路由。存储不可用（例如 Host 半边
+				// 还是旧版本、路由没注册）时静默降级为“不记忆”：选择模型本身不受影响。
+				const readPickerState = async () => {
+					const response = await fetch(STATE_URL, {
+						headers: { accept: 'application/json' },
+						credentials: 'same-origin',
+					});
+					if (!response.ok) throw new Error(`HTTP ${response.status}`);
+					const body = await response.json();
+					return normalizePickerState(body?.state);
+				};
+				const savePickerState = async (patch) => {
+					const response = await fetch(STATE_SAVE_URL, {
+						method: 'PUT',
+						headers: { 'content-type': 'application/json', accept: 'application/json' },
+						credentials: 'same-origin',
+						body: JSON.stringify(patch),
+					});
+					if (!response.ok) throw new Error(`HTTP ${response.status}`);
+					const body = await response.json();
+					return normalizePickerState(body?.state);
+				};
 				// 被寻址的子会话（subagent）没有独立的模型选择权，宿主自带的选择器
 				// 在这种会话里直接不渲染；这里保持一致，免得选完没有效果。
 				const isAddressedSubagent = (sessionId) => {
@@ -354,11 +486,20 @@ window.__ModuleLoader__.load({
 					// 过渡一次；真的拖动时关掉过渡，指针到哪画到哪。
 					const [dragIndex, setDragIndex] = useState(null);
 					const [dragging, setDragging] = useState(false);
+					// 偏好：从 Host 侧存储读入（供应商顺序 + 按模型记的档位）。
+					const [pickerState, setPickerState] = useState({ providerOrder: [], efforts: [] });
+					// 供应商拖动排序：dragId = 正在拖的那一家；liveOrder = 拖动中的
+					// 临时顺序（松手才落盘，中途取消就丢弃预览）。
+					const [dragId, setDragId] = useState(null);
+					const [liveOrder, setLiveOrder] = useState(null);
 
 					const rootRef = useRef(null);
 					const triggerRef = useRef(null);
 					const layerRef = useRef(null);
 					const trackRef = useRef(null);
+					const railRef = useRef(null);
+					// 拖动排序时记录指针 id 与拖动中的顺序快照；松手时用它判断是否有变化。
+					const dragRef = useRef({ pointerId: null, order: null, start: null });
 
 					// 本会话已选中的模型（宿主投影）。投影里的 next 是“刚切、还没发出去”
 					// 的那一个，优先级高于目录默认值。
@@ -372,6 +513,14 @@ window.__ModuleLoader__.load({
 					const current = optimistic ?? projected ?? catalog.value?.default ?? null;
 
 					const groups = catalog.value?.groups ?? [];
+					// 左侧实际顺序：记忆顺序在前，目录里新出现的按目录顺序接在后面。
+					const orderedGroups = orderedGroupsOf(groups, pickerState);
+					// 拖动过程中显示预览顺序；松手或取消后回到已保存的顺序。
+					const railGroups = liveOrder === null
+						? orderedGroups
+						: liveOrder
+							.map((id) => groups.find((group) => group.id === id))
+							.filter((group) => group !== undefined);
 
 					// 右侧展示的供应商：悬停项优先，否则是当前选中模型所属的供应商，
 					// 再否则是第一个。全部派生自 state，不额外写一份，所以悬停切换时
@@ -381,7 +530,7 @@ window.__ModuleLoader__.load({
 						? hovered
 						: (current !== null && groups.some((group) => group.id === current.provider))
 							? current.provider
-							: groups[0]?.id;
+							: orderedGroups[0]?.id;
 					const activeGroup = groups.find((group) => group.id === activeId);
 
 					const currentGroup = current === null ? undefined : groups.find((group) => group.id === current.provider);
@@ -392,7 +541,15 @@ window.__ModuleLoader__.load({
 					// 思考强度属于“当前选中的模型”，不属于悬停的供应商：所以触发按钮上的
 					// 思考强度只跟 current 走，鼠标在左边一列上移动时它不会跟着变。
 					const currentEfforts = currentModel?.reasoning?.efforts ?? [];
-					const currentEffortId = current?.reasoningEffort ?? currentModel?.reasoning?.defaultEffort;
+					// 宿主投影只记录“当前这一次选择”的档位，换模型后不保留旧模型的；
+					// 插件按「供应商 + 模型」自己记住用户上次显式选的档位（pickerState），
+					// 从没选过的模型才回落到目录默认值。
+					const rememberedEffortId = current === null
+						? undefined
+						: findRememberedEffort(pickerState, current.provider, current.model);
+					const effortSelection = resolveEffortSelection(current, currentModel, rememberedEffortId);
+					const hostEffortId = effortSelection.host;
+					const currentEffortId = effortSelection.display;
 
 					// 面板里的滑条同样只描述当前选中模型，和悬停的供应商无关——这样鼠标在
 					// 左侧一列上滑动时，右侧下方这一块既不换内容也不改高度，面板不会跳动。
@@ -443,6 +600,22 @@ window.__ModuleLoader__.load({
 					// 让供应商/模型列表跟上宿主侧的变化（宿主有缓存，代价很小）。
 					useEffect(() => { loadCatalog(); }, [loadCatalog]);
 					useEffect(() => { if (open) loadCatalog(); }, [open, loadCatalog]);
+
+					// 偏好（供应商顺序 + 档位记忆）挂载即读一次，之后每次打开面板再读，
+					// 这样别的窗口刚写进去的顺序/档位也能及时反映到这边。
+					useEffect(() => {
+						let alive = true;
+						readPickerState()
+							.then((value) => { if (alive) setPickerState(value); })
+							.catch(() => { /* 存储不可用时保持刚打开时的空偏好 */ });
+						return () => { alive = false; };
+					}, []);
+					useEffect(() => {
+						if (!open) return;
+						readPickerState()
+							.then((value) => setPickerState(value))
+							.catch(() => { /* 同上 */ });
+					}, [open]);
 
 					// 宿主投影追上来之后丢掉本地乐观值，避免它盖住之后的外部切换。
 					useEffect(() => {
@@ -545,10 +718,27 @@ window.__ModuleLoader__.load({
 						}
 					}, [sessionId, t]);
 
+					// 记忆写入：先在内存里更新（本页立刻生效），再异步落盘 Host 存储。
+					// 落盘失败只影响“重开之后还记不记得”，不影响这次选择本身。
+					const persistPickerPatch = useCallback((patch) => {
+						void savePickerState(patch)
+							.then((value) => setPickerState(value))
+							.catch(() => { /* 存储不可用：保留内存里的记忆 */ });
+					}, []);
+					const rememberEffort = useCallback((provider, model, effortId) => {
+						setPickerState((previous) => rememberEffortIn(previous, provider, model, effortId));
+						persistPickerPatch({ effort: { provider, model, effort: effortId } });
+					}, [persistPickerPatch]);
+					const persistOrder = useCallback((ids) => {
+						setPickerState((previous) => ({ ...previous, providerOrder: ids }));
+						persistPickerPatch({ providerOrder: ids });
+					}, [persistPickerPatch]);
+
 					const chooseModel = useCallback(async (group, model) => {
-						const onSameRoute = current !== null && current.provider === group.id && current.model === model.id;
-						// 同一条路由下保留当前思考强度；换了模型则用该模型的默认值。
-						const effort = onSameRoute ? current.reasoningEffort : model.reasoning?.defaultEffort;
+						// 换了模型时优先回填“这个模型上次记住的档位”；没有记忆才用目录默认值。
+						// 同一条路由下保留当前档位不变（见 resolveSwitchEffort）。
+						const remembered = findRememberedEffort(pickerState, group.id, model.id);
+						const { onSameRoute, effort } = resolveSwitchEffort(current, group.id, model, remembered);
 						if (onSameRoute && effort === current.reasoningEffort) { setOpen(false); return; }
 						const ok = await submit({
 							provider: group.id,
@@ -556,14 +746,107 @@ window.__ModuleLoader__.load({
 							...(effort === undefined ? {} : { reasoningEffort: effort }),
 						});
 						if (ok) setOpen(false);
-					}, [current, submit]);
+					}, [current, pickerState, submit]);
 
 					const chooseEffort = useCallback(async (nextEffortId) => {
 						if (current === null) return;
-						// 已经生效的强度不必再发一次；未显式选中时以模型默认值为准。
-						if (nextEffortId === currentEffortId) return;
-						await submit({ provider: current.provider, model: current.model, reasoningEffort: nextEffortId });
-					}, [current, currentEffortId, submit]);
+						const provider = current.provider;
+						const model = current.model;
+						// 宿主已经生效的档位不必再发一次；但记忆里若是别的档位（例如
+						// 上次重启后宿主投影丢了档位），仍然要把它写进记忆。
+						if (nextEffortId === hostEffortId) {
+							if (findRememberedEffort(pickerState, provider, model) !== nextEffortId) {
+								rememberEffort(provider, model, nextEffortId);
+							}
+							return;
+						}
+						// 先提交，成功后再记忆：失败时记忆不该领先于实际生效值。
+						const ok = await submit({ provider, model, reasoningEffort: nextEffortId });
+						if (ok) rememberEffort(provider, model, nextEffortId);
+					}, [current, hostEffortId, pickerState, submit, rememberEffort]);
+
+					// 供应商拖动排序：只有按在手柄上才开始拖。移动中按指针位置算插入点、
+					// 更新预览顺序；松手才写盘；Escape 取消（不写盘）。
+					const beginProviderDrag = (event, groupId) => {
+						if (event.button !== undefined && event.button !== 0) return;
+						event.preventDefault();
+						event.stopPropagation();
+						const order = orderedGroups.map((group) => group.id);
+						dragRef.current = { pointerId: event.pointerId, order, start: order };
+						setDragId(groupId);
+						setLiveOrder(order);
+						setHovered(null);
+						setLitProvider(null);
+						setLitModel(null);
+						event.currentTarget.setPointerCapture?.(event.pointerId);
+					};
+					const moveProviderDrag = (event) => {
+						const drag = dragRef.current;
+						if (dragId === null || drag.pointerId !== event.pointerId) return;
+						const rail = railRef.current;
+						if (rail === null) return;
+						const rows = Array.from(rail.querySelectorAll('[data-provider-row]'));
+						if (rows.length === 0) return;
+						// 指针越过某一行中点，就插到那一行的位置（最后一行之下则落到末尾）。
+						let target = rows.length;
+						for (let index = 0; index < rows.length; index += 1) {
+							const rect = rows[index].getBoundingClientRect();
+							if (event.clientY < rect.top + rect.height / 2) { target = index; break; }
+						}
+						setLiveOrder((previous) => {
+							if (previous === null) return previous;
+							const next = moveProviderId(previous, dragId, target);
+							if (next === previous) return previous;
+							drag.order = next;
+							return next;
+						});
+					};
+					const finishProviderDrag = (event) => {
+						const drag = dragRef.current;
+						if (dragId === null || drag.pointerId !== event.pointerId) return;
+						const finalOrder = drag.order;
+						const startOrder = drag.start;
+						dragRef.current = { pointerId: null, order: null, start: null };
+						setDragId(null);
+						setLiveOrder(null);
+						if (finalOrder === null) return;
+						// 只按了一下手柄、没有实际挪动：不写盘。
+						if (startOrder !== null && startOrder !== undefined
+							&& startOrder.join('\u0000') === finalOrder.join('\u0000')) return;
+						// 只比较当前在场的供应商：目录里已消失的 id 不该让一次“没动”的
+						// 拖动也变成一次写入。
+						const storedOrder = pickerState.providerOrder.filter((id) => finalOrder.includes(id));
+						const changed = storedOrder.length !== finalOrder.length
+							|| finalOrder.some((id, index) => id !== storedOrder[index]);
+						if (changed) persistOrder(finalOrder);
+					};
+					const cancelProviderDrag = () => {
+						dragRef.current = { pointerId: null, order: null };
+						setDragId(null);
+						setLiveOrder(null);
+					};
+					// 拖动中按 Esc 取消这次排序，不落盘。窗口级指针监听作为兜底：
+// 手柄用 setPointerCapture 接管指针，个别环境（或测试里）不支持时仍能拖动。
+					useEffect(() => {
+						if (dragId === null) return;
+						const onKeyDown = (event) => {
+							if (event.key !== 'Escape') return;
+							event.stopPropagation();
+							cancelProviderDrag();
+						};
+						const onPointerMove = (event) => moveProviderDrag(event);
+						const onPointerUp = (event) => finishProviderDrag(event);
+						document.addEventListener('keydown', onKeyDown, true);
+						window.addEventListener('pointermove', onPointerMove, true);
+						window.addEventListener('pointerup', onPointerUp, true);
+						window.addEventListener('pointercancel', onPointerUp, true);
+						return () => {
+							document.removeEventListener('keydown', onKeyDown, true);
+							window.removeEventListener('pointermove', onPointerMove, true);
+							window.removeEventListener('pointerup', onPointerUp, true);
+							window.removeEventListener('pointercancel', onPointerUp, true);
+						};
+					}, [dragId]);
 
 					// 滑条：按下/拖动只更新预览（dragIndex），抬起时提交一次，避免拖过
 					// 每一档都发一次请求。点击某个圆点走的是同一条路径（圆点不自己处理
@@ -600,8 +883,10 @@ window.__ModuleLoader__.load({
 						const index = indexAt(event);
 						const target = efforts[index];
 						setDragging(false);
-						// 没变化（或当前不可切）时直接撤预览，不必来回发请求。
-						if (target === undefined || target.id === currentEffortId) {
+						// 点不存在的档位（目录刷新导致圆点变少）时直接撤预览；其余都交给
+						// chooseEffort——它自己会跳过“宿主已在该档”的重复提交，同时把
+						// 档位记忆对齐（显示值可能来自记忆、与宿主不同）。
+						if (target === undefined) {
 							setDragIndex(null);
 							return;
 						}
@@ -643,40 +928,61 @@ window.__ModuleLoader__.load({
 								onMouseLeave: clearLit,
 							},
 								// 一级菜单：供应商。悬停即切换右侧内容。
-								h('div', { className: 'dsh-mp-card dsh-mp-rail' },
+								h('div', { ref: railRef, className: 'dsh-mp-card dsh-mp-rail' },
 									groups.length === 0
 										? h('div', { className: 'dsh-mp-note' },
 											catalog.status === 'error'
 												? catalog.message
 												: catalog.status === 'ready' ? t('emptyCatalog') : t('loading'))
-										: groups.map((group) => h('button', {
+										: railGroups.map((group) => h('div', {
 											key: group.id,
-											type: 'button',
-											className: 'dsh-mp-row',
-											// data-active 只表示“真正被选中的那一家”（带 ✓、常亮），
-											// 不随悬停变化。右侧展示哪一家仍由 activeId 派生（见上）。
-											'data-active': current !== null && current.provider === group.id ? 'true' : 'false',
-											// data-lit 是“指针正指向这一家”的临时高亮。它由状态驱动：
-											// 指针移到右侧模型列表后仍然保持，直到离开整个面板才清空。
-											'data-lit': litProvider === group.id ? 'true' : 'false',
-											onMouseEnter: () => {
-												setHovered(group.id);
-												setLitProvider(group.id);
-												// 指针回到左列时，右列不该还留着上一行的亮底：
-												// 右列只在指针真正停在模型列表里时才亮。
-												setLitModel(null);
+											className: 'dsh-mp-rail-row',
+											'data-provider-row': group.id,
+											'data-dragging': dragId === group.id ? 'true' : 'false',
+										}, [
+												h('button', {
+													key: 'handle',
+													type: 'button',
+													className: 'dsh-mp-handle',
+													title: t('handle.title'),
+													'aria-label': t('handle.title'),
+													tabIndex: -1,
+													onPointerDown: (event) => beginProviderDrag(event, group.id),
+													onPointerMove: moveProviderDrag,
+													onPointerUp: finishProviderDrag,
+													onPointerCancel: finishProviderDrag,
+													onClick: (event) => event.stopPropagation(),
+												}, h(IconGrip)),
+												h('button', {
+													key: group.id,
+													type: 'button',
+													className: 'dsh-mp-row',
+													// data-active 只表示“真正被选中的那一家”（带 ✓、常亮），
+													// 不随悬停变化。右侧展示哪一家仍由 activeId 派生（见上）。
+													'data-active': current !== null && current.provider === group.id ? 'true' : 'false',
+													// data-lit 是“指针正指向这一家”的临时高亮。它由状态驱动：
+													// 指针移到右侧模型列表后仍然保持，直到离开整个面板才清空。
+													'data-lit': litProvider === group.id ? 'true' : 'false',
+													onMouseEnter: () => {
+														if (dragId !== null) return;
+														setHovered(group.id);
+														setLitProvider(group.id);
+														// 指针回到左列时，右列不该还留着上一行的亮底：
+														// 右列只在指针真正停在模型列表里时才亮。
+														setLitModel(null);
+													},
+													onFocus: () => {
+														setHovered(group.id);
+														setLitProvider(group.id);
+													},
+													onClick: () => setHovered(group.id),
 											},
-											onFocus: () => {
-												setHovered(group.id);
-												setLitProvider(group.id);
-											},
-											onClick: () => setHovered(group.id),
-										},
-											h('span', { className: 'dsh-mp-row-label' }, group.name ?? group.id),
-											current !== null && current.provider === group.id
-												? h('span', { className: 'dsh-mp-row-check' }, h(IconCheck))
-												: null,
-										)),
+												h('span', { className: 'dsh-mp-row-label' }, group.name ?? group.id),
+												current !== null && current.provider === group.id
+													? h('span', { className: 'dsh-mp-row-check' }, h(IconCheck))
+													: null,
+											),
+										])),
 								),
 								// 二级区域：该供应商的模型列表 + 思考强度。
 								h('div', { className: 'dsh-mp-card dsh-mp-pane' },
@@ -706,7 +1012,7 @@ window.__ModuleLoader__.load({
 															'data-lit': litModel === model.id ? 'true' : 'false',
 															disabled: busy,
 															title: model.description ?? model.name ?? model.id,
-															onMouseEnter: () => setLitModel(model.id),
+															onMouseEnter: () => { if (dragId === null) setLitModel(model.id); },
 															// 指针从这一行移到别的行（或滑到思考强度那一行）时熄灭自己；
 															// 供应商行的高亮不受影响，左右两列互不干扰。
 															// 用函数式更新并带上 id 判断：即使 mouseleave 与 mouseenter
