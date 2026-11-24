@@ -9,7 +9,7 @@ import path from 'node:path'
 
 import { apply, __internals } from '../index.js'
 
-const { createStateStore, makeRoutes, normalizeState, STATE_VERSION, ROUTE_BASE } = __internals
+const { createStateStore, makeRoutes, makeFetchRoutes, normalizeState, STATE_VERSION, ROUTE_BASE } = __internals
 
 function tempDir() {
   return mkdtemp(path.join(os.tmpdir(), 'model-picker-test-'))
@@ -295,6 +295,44 @@ test('路由：PUT 可携带 layout，GET 返回完整状态', async () => {
 
     const read = await call(readRoute, fakeReq(), fakeRes())
     assert.deepEqual(read.state.layout, { railWidth: 200, paneWidth: 300, height: null })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Fetch 路由是组合层 connection 服务的正规注册路径：/api 前缀路由负责鉴权后
+// 再按路径把请求转给这里，所以路径必须在 /api 下、方法要声明、鉴权不再自做。
+test('Fetch 路由：路径在 /api 下、声明方法，且能读写同一份状态', async () => {
+  const dir = await tempDir()
+  try {
+    const store = createStateStore({ dir })
+    const routes = makeFetchRoutes(store)
+    const paths = routes.map((route) => route.path)
+    assert.deepEqual(paths, [`${ROUTE_BASE}/state`, `${ROUTE_BASE}/state/save`, `${ROUTE_BASE}/health`])
+    for (const route of routes) {
+      assert.ok(route.path.startsWith('/api/'), `路径必须落在 /api 下：${route.path}`)
+      assert.ok(Array.isArray(route.methods) && route.methods.length > 0)
+      assert.equal(new Set(route.methods).size, route.methods.length)
+      assert.equal(typeof route.fetch, 'function')
+    }
+
+    const save = routes.find((route) => route.path === `${ROUTE_BASE}/state/save`)
+    const read = routes.find((route) => route.path === `${ROUTE_BASE}/state`)
+    const saved = await save.fetch(new Request(`http://127.0.0.1${save.path}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ layout: { railWidth: 260, paneWidth: 380, height: 320 } }),
+    }))
+    assert.equal(saved.status, 200)
+    assert.deepEqual((await saved.json()).state.layout, { railWidth: 260, paneWidth: 380, height: 320 })
+
+    const reread = await read.fetch(new Request(`http://127.0.0.1${read.path}`))
+    assert.equal(reread.status, 200)
+    assert.deepEqual((await reread.json()).state.layout, { railWidth: 260, paneWidth: 380, height: 320 })
+
+    // 非对象请求体按 400 拒绝，不写坏文件
+    const bad = await save.fetch(new Request(`http://127.0.0.1${save.path}`, { method: 'PUT', body: '"nope"' }))
+    assert.equal(bad.status, 400)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

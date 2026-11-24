@@ -547,7 +547,40 @@ window.__ModuleLoader__.load({
 			}
 			return ordered;
 		};
+		// 读回来的尺寸和本地缓存二选一：Host 有记录就以 Host 为准（它才是跨重启的
+		// 权威来源），Host 说“没有记录”时才退回本页缓存——这样 Host 半边暂时不可用
+		// 时，宽高也不会在切换会话或刷新页面后被打回默认值。
+		const preferLayout = (cached, loaded) => (loaded === null || loaded === undefined ? cached ?? null : loaded);
 		// #endregion
+		// 尺寸缓存：Host 的 state.json 是唯一的跨重启来源，但读它是异步的。
+		// 组件重挂载（切换会话）时先用内存缓存同步渲染，避免“先跳回默认尺寸再
+		// 跳回来”；Host 暂时不可用时（路由缺失、请求被拒），本地缓存还能让宽高
+		// 在刷新页面、切换会话后保持原样。
+		const LAYOUT_CACHE_KEY = 'dsh-model-picker/layout';
+		let cachedLayout;
+		let cachedLayoutRead = false;
+		const readLayoutCache = () => {
+			if (cachedLayoutRead) return cachedLayout;
+			cachedLayoutRead = true;
+			try {
+				const raw = window.localStorage.getItem(LAYOUT_CACHE_KEY);
+				cachedLayout = raw === null ? null : normalizeLayout(JSON.parse(raw));
+			} catch {
+				cachedLayout = null;
+			}
+			return cachedLayout;
+		};
+		const writeLayoutCache = (layout) => {
+			const value = normalizeLayout(layout ?? null);
+			cachedLayout = value;
+			cachedLayoutRead = true;
+			try {
+				if (value === null) window.localStorage.removeItem(LAYOUT_CACHE_KEY);
+				else window.localStorage.setItem(LAYOUT_CACHE_KEY, JSON.stringify(value));
+			} catch {
+				/* 本地缓存不可用时只失去“Host 缺席期间”的记忆 */
+			}
+		};
 		// 同一条路由（供应商 + 模型）即视为“宿主已经追上来了”。思考强度不参与比较：
 		// 宿主回填的投影可能不带 reasoningEffort，若把它算进相等判断，乐观值会一直
 		// 挂着，反而盖住之后从别处发起的切换。
@@ -612,24 +645,44 @@ window.__ModuleLoader__.load({
 				const sessionFace = () => ctx.remote.session;
 				// 偏好存储走 Host 半边注册的同源回环路由。存储不可用（例如 Host 半边
 				// 还是旧版本、路由没注册）时静默降级为“不记忆”：选择模型本身不受影响。
+				// Host 刚重启、插件半边还在注册路由时，第一次请求可能落空；
+				// 轻量重试一次即可，不做无限退避（存储不可用要静默降级，不能拖慢选择）。
+				const withRetry = async (run, attempts = 2, delayMs = 300) => {
+					let lastError;
+					for (let attempt = 0; attempt < attempts; attempt += 1) {
+						try {
+							return await run();
+						} catch (error) {
+							lastError = error;
+							if (attempt < attempts - 1) {
+								await new Promise((resolve) => { setTimeout(resolve, delayMs * (attempt + 1)); });
+							}
+						}
+					}
+					throw lastError;
+				};
 				const readPickerState = async () => {
-					const response = await fetch(STATE_URL, {
-						headers: { accept: 'application/json' },
-						credentials: 'same-origin',
+					const body = await withRetry(async () => {
+						const response = await fetch(STATE_URL, {
+							headers: { accept: 'application/json' },
+							credentials: 'same-origin',
+						});
+						if (!response.ok) throw new Error(`HTTP ${response.status}`);
+						return await response.json();
 					});
-					if (!response.ok) throw new Error(`HTTP ${response.status}`);
-					const body = await response.json();
 					return normalizePickerState(body?.state);
 				};
 				const savePickerState = async (patch) => {
-					const response = await fetch(STATE_SAVE_URL, {
-						method: 'PUT',
-						headers: { 'content-type': 'application/json', accept: 'application/json' },
-						credentials: 'same-origin',
-						body: JSON.stringify(patch),
+					const body = await withRetry(async () => {
+						const response = await fetch(STATE_SAVE_URL, {
+							method: 'PUT',
+							headers: { 'content-type': 'application/json', accept: 'application/json' },
+							credentials: 'same-origin',
+							body: JSON.stringify(patch),
+						});
+						if (!response.ok) throw new Error(`HTTP ${response.status}`);
+						return await response.json();
 					});
-					if (!response.ok) throw new Error(`HTTP ${response.status}`);
-					const body = await response.json();
 					return normalizePickerState(body?.state);
 				};
 				// 被寻址的子会话（subagent）没有独立的模型选择权，宿主自带的选择器
@@ -678,7 +731,11 @@ window.__ModuleLoader__.load({
 					const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
 					// size = 用户拖出来的尺寸；某一维为 null 表示还没拖过
 					// （宽走 RAIL_WIDTH/PANE_WIDTH 默认值，高走内容自适应）。
-					const [size, setSize] = useState({ left: null, railWidth: null, paneWidth: null, height: null, shift: 0 });
+					// 初值直接取缓存：切换会话会重新挂载组件，这一帧就要按上次的宽高渲染，
+					// 否则会先闪一下默认尺寸。Host 的权威值稍后异步覆盖。
+					const [size, setSize] = useState(() => ({
+						left: null, railWidth: null, paneWidth: null, height: null, shift: 0, ...(readLayoutCache() ?? {}),
+					}));
 					// hoverZone = 悬停武装的热区（光标与提示线已出现）；pressingZone = 鼠标按住的
 					// 热区（按下即接管提示，未到拖动阈值也算）；resizingZone = 真正在拖的热区。
 					// 三者合成一个“当前武装态”，避免按下瞬间把提示清空又重建（会闪一下）。
@@ -813,16 +870,18 @@ window.__ModuleLoader__.load({
 					// 读回来的偏好里也带着尺寸：只有本页还没拖过尺寸时才套用。
 					const applyLoadedState = useCallback((value) => {
 						setPickerState(value);
+						// Host 给的就是权威值；Host 说“没有记录”时才退回本页缓存。
+						const layout = preferLayout(readLayoutCache(), value.layout);
+						if (layout === null) return;
+						if (layout !== value.layout) writeLayoutCache(layout);
 						if (sizeTouchedRef.current) return;
 						// 只套用宽高；水平偏移是本次会话里被拖出来的，不持久化。
-						if (value.layout !== null) {
-							setSize((previous) => ({
-								...previous,
-								railWidth: value.layout.railWidth,
-								paneWidth: value.layout.paneWidth,
-								height: value.layout.height,
-							}));
-						}
+						setSize((previous) => ({
+							...previous,
+							railWidth: layout.railWidth,
+							paneWidth: layout.paneWidth,
+							height: layout.height,
+						}));
 					}, []);
 
 					useEffect(() => { loadCatalog(); }, [loadCatalog]);
@@ -1051,10 +1110,13 @@ window.__ModuleLoader__.load({
 								height: changesHeight ? settled.height : previous.height,
 								shift,
 							}));
+							// 先写本页缓存（同步、不依赖 Host）：切会话/刷新立刻就能拿到，
+							// 再把同一份布局交给 Host 落盘，才是跨重启的那一层。
+							writeLayoutCache(layout);
 							// 尺寸落盘失败只影响“重启后还记不记得”，不影响这次拖动本身。
 							void savePickerState({ layout })
 								.then((value) => setPickerState(value))
-								.catch(() => { /* 静默降级为不记忆尺寸 */ });
+								.catch(() => { /* 静默降级为不记忆尺寸（本页缓存仍然有效） */ });
 						};
 						const move = (event) => {
 							const drag = resizeRef.current;

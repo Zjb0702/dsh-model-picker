@@ -15,9 +15,10 @@
 //
 // 存储位置：$DSH_HOME/model-picker/state.json
 //   （默认 ~/.dsh/model-picker/state.json；可用环境变量 DSH_HOME 改根目录）
-// 读写接口：同源回环路由，只有本机浏览器页面能用：
+// 读写接口：注册到组合层 connection 服务的 Fetch 路由表（/api 前缀路由负责
+// 鉴权与请求体），只有本机浏览器页面能用：
 //   GET  /api/dsh-model-picker/state       读取
-//   PUT  /api/dsh-model-picker/state/save  合并写入（providerOrder / effort）
+//   PUT  /api/dsh-model-picker/state/save  合并写入（providerOrder / effort / layout）
 //
 // 向后兼容：state.json 允许旧格式（见 normalizeState 的注释），读取时
 // 自动归一成当前版本；无法解析的文件会先改名留档，再从空状态开始。
@@ -368,8 +369,72 @@ export function makeRoutes(store, ctx) {
   ]
 }
 
+/**
+ * Fetch 路由（组合层 connection.fetch.register 的注册项）。
+ *
+ * `/api` 这个前缀路由由 client-connection 自己挂载：它先做鉴权（Host/Origin
+ * 围栏 + 浏览器登录 cookie），再把请求转给注册在 fetch 表里的路径。插件想在
+ * `/api/...` 下开自己的接口，正规做法就是注册到这里；自己往 webServer 上挂
+ * 同名 exact 路由会和这条前缀路由抢同一个路径。
+ *
+ * 与 makeRoutes 的 node 风格 handler 是同一份逻辑的两个适配层：有 connection
+ * 服务时用这一份，没有时才退回 exact 路由。
+ */
+export function makeFetchRoutes(store) {
+  const json = (status, body) => new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  })
+  return [
+    {
+      path: `${ROUTE_BASE}/state`,
+      methods: ['GET'],
+      fetch: async () => {
+        try {
+          return json(200, { ok: true, state: await store.read() })
+        } catch (error) {
+          return json(500, { ok: false, error: { code: 'state/read', message: String(error?.message ?? error) } })
+        }
+      },
+    },
+    {
+      path: `${ROUTE_BASE}/state/save`,
+      methods: ['PUT'],
+      fetch: async (request) => {
+        try {
+          const body = await request.json()
+          if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+            throw new Error('request body must be a JSON object')
+          }
+          return json(200, { ok: true, state: await store.update(body) })
+        } catch (error) {
+          return json(400, { ok: false, error: { code: 'state/write', message: String(error?.message ?? error) } })
+        }
+      },
+    },
+    {
+      path: `${ROUTE_BASE}/health`,
+      methods: ['GET'],
+      fetch: async () => json(200, { ok: true, version: STATE_VERSION, file: store.file, transport: 'fetch' }),
+    },
+  ]
+}
+
 export function apply(ctx) {
   const store = createStateStore()
+  // Host 半边真的被加载时，磁盘上就会出现这份（可能还是空的）状态文件：
+  // 它既是首读的合法起点，也是“Host 半边是否跑起来了”最直接的证据。
+  void store.update({}).catch(() => {})
+  const connection = ctx?.connection ?? (typeof ctx?.get === 'function' ? ctx.get('connection', false) : undefined)
+  if (typeof connection?.fetch?.register === 'function') {
+    // 框架路径：/api 前缀路由接管鉴权与请求体，再按路径分发到这里。
+    ctx.effect(
+      () => makeFetchRoutes(store).map((route) => connection.fetch.register(route)),
+      'model-picker: state fetch routes',
+    )
+    return
+  }
+  // 兼容路径：组合层没有 connection 服务时，才自己往 webServer 上挂 exact 路由。
   const routes = makeRoutes(store, ctx)
   ctx.effect(() => {
     const disposers = routes.map((route) => ctx.webServer.register(route))
@@ -386,4 +451,4 @@ export function apply(ctx) {
 }
 
 /** 测试接缝：不依赖 Cordis 图也能构造仓库、注册路由、跑归一化。 */
-export const __internals = { createStateStore, makeRoutes, normalizeState, sanitizeLayout, LAYOUT_LIMITS, ROUTE_BASE, STATE_VERSION }
+export const __internals = { createStateStore, makeRoutes, makeFetchRoutes, normalizeState, sanitizeLayout, LAYOUT_LIMITS, ROUTE_BASE, STATE_VERSION }

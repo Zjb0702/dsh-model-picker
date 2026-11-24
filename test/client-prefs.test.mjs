@@ -17,7 +17,7 @@ return {
   normalizePickerState, rememberEffortIn, orderedGroupsOf, resolveEffortSelection,
   resolveSwitchEffort, moveProviderId, resolveHitZone, panelCursor, shouldArmHover,
   hoverNeedsRestart, exceedsDragThreshold, resolveArmedZone, clampDragDelta, applyResizeDelta,
-  resolvePanelBox,
+  resolvePanelBox, preferLayout,
 };
 `)(196, 340, 6)
 
@@ -26,7 +26,7 @@ const {
   normalizePickerState, rememberEffortIn, orderedGroupsOf, resolveEffortSelection,
   resolveSwitchEffort, moveProviderId, resolveHitZone, panelCursor, shouldArmHover,
   hoverNeedsRestart, exceedsDragThreshold, resolveArmedZone, clampDragDelta, applyResizeDelta,
-  resolvePanelBox,
+  resolvePanelBox, preferLayout,
 } = utils
 
 const model = (id, efforts, defaultEffort) => ({
@@ -355,3 +355,16 @@ test('clampDragDelta：边框到达上下限时多余位移被丢掉', () => {
   assert.equal(corner.dx, base.railWidth - PANEL_LIMITS.railMax)
   assert.equal(corner.dy, PANEL_LIMITS.heightMax - base.height)
 })
+
+test('preferLayout：Host 有记录就用 Host，没有才退回本页缓存', () => {
+  const cached = { railWidth: 240, paneWidth: 360, height: 300 };
+  const loaded = { railWidth: 200, paneWidth: 300, height: null };
+  // 权威值优先
+  assert.deepEqual(preferLayout(cached, loaded), loaded);
+  // Host 说“没有记录”时，缓存继续生效（切会话/刷新不被打回默认尺寸）
+  assert.deepEqual(preferLayout(cached, null), cached);
+  assert.deepEqual(preferLayout(cached, undefined), cached);
+  // 两边都没有 → 默认/自适应
+  assert.equal(preferLayout(null, null), null);
+  assert.equal(preferLayout(undefined, null), null);
+});

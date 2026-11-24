@@ -146,6 +146,24 @@
 - `PUT /state/save` 携带 `{ layout }` 合并写入；客户端保存失败只影响“重启后还记不记得尺寸”，
   不影响这次拖动与选择模型。
 
+尺寸的读取 / 回填 / 保存链路（切换会话、刷新页面、重启 App 都要保持）：
+
+- **传输层**：Host 半边把两个接口注册到组合层 `connection` 服务的 Fetch 路由表
+  （`connection.fetch.register({ path, methods, fetch })`，路径按框架要求落在 `/api/` 下）。
+  框架自己挂的 `/api` 前缀路由先做 Host/Origin 围栏与浏览器 cookie 鉴权，再按路径把
+  `Request` 转给插件的 `fetch`；插件不再自己判鉴权。组合层没有 `connection` 服务时，才退回
+  `webServer.register` 的 exact 路由（node `req/res` 风格 + `requestRejection`）。
+  Host 半边启动时会先 `store.update({})` 落一份空状态——文件出现即代表 Host 半边确实跑起来了。
+- **本页缓存**：`writeLayoutCache` / `readLayoutCache`（`localStorage` 键
+  `dsh-model-picker/layout`，值经 `normalizeLayout` 归一）。松手时先同步写缓存再发 `PUT`，
+  于是切换会话重新挂载组件时，`useState` 初值就是上次的宽高（首帧不闪默认尺寸）；Host 不可用
+  时刷新页面也还在。
+- **优先级**：`preferLayout(cached, loaded)`——Host 返回了 `layout` 就用 Host，返回 `null`
+  才用缓存；`applyLoadedState` 在 `sizeTouchedRef` 为假时才写回 `setSize`（本页已经拖过就不
+  让迟到的响应覆盖）。尺寸是全局偏好，所有会话共用一份，不按 `sessionId` 分开存。
+- **重试**：读写都经过 `withRetry`（2 次、间隔 300ms），覆盖 Host 刚重启、路由还没注册完的
+  空窗；仍失败则静默降级，选择模型不受影响。
+
 ## 偏好存储
 
 偏好写在 `$DSH_HOME/model-picker/state.json`（默认 `~/.dsh/model-picker/state.json`），

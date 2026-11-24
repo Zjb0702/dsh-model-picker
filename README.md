@@ -72,6 +72,16 @@ plugin_manager({ action: "install_bundle", target: "D:\\Documents\\deepseek-harn
 尺寸随其他偏好一起存在 `state.json` 的 `layout` 字段里（旧文件读取时自动补 null，原有顺序
 与档位记忆一条不丢）；存储不可用时静默降级为不记忆尺寸。
 
+尺寸是**全局偏好**（所有会话共用一份），不按会话分开存。读写链路有三层：
+
+1. **Host 状态文件**（权威、跨重启）：Host 半边通过组合层 `connection` 服务的 Fetch 路由表注册
+   `GET /api/dsh-model-picker/state` 与 `PUT .../state/save`——`/api` 前缀路由由框架挂载，
+   负责鉴权与请求体，再按路径转给插件；组合层没有 `connection` 时才退回自挂 exact 路由。
+2. **本页缓存**（`localStorage` 键 `dsh-model-picker/layout`）：松手瞬间就写，组件重新挂载
+   （切换会话）时首帧直接按它渲染，不会先闪一下默认尺寸；Host 暂时不可用时刷新也还在。
+3. **读取优先级**：Host 有记录用 Host，Host 说“没有记录”才退回本页缓存；Host 读请求失败会
+   轻量重试一次，仍失败就静默降级。
+
 ## 座位
 
 `conversation.input.model`，priority `-200`（宿主自带实现为 `0`；single 座位只渲染
