@@ -429,27 +429,38 @@ export function apply(ctx) {
   // 它既是首读的合法起点，也是“Host 半边是否跑起来了”最直接的证据。
   void store.update({}).catch(() => {})
   const connection = ctx?.connection ?? (typeof ctx?.get === 'function' ? ctx.get('connection', false) : undefined)
-  if (typeof connection?.fetch?.register === 'function') {
-    // 框架路径：/api 前缀路由接管鉴权与请求体，再按路径分发到这里。
-    ctx.effect(
-      () => makeFetchRoutes(store).map((route) => connection.fetch.register(route)),
-      'model-picker: state fetch routes',
-    )
-    return
-  }
-  // 兼容路径：组合层没有 connection 服务时，才自己往 webServer 上挂 exact 路由。
-  const routes = makeRoutes(store, ctx)
-  ctx.effect(() => {
-    const disposers = routes.map((route) => ctx.webServer.register(route))
-    return () => {
-      for (const dispose of disposers) {
-        try {
-          dispose()
-        } catch {
-          /* already released */
-        }
+  // 注册两条路径择一：有 connection 服务就走框架的 Fetch 路由表（/api 前缀路由
+  // 负责 Host/Origin 围栏与浏览器 cookie 鉴权，再按路径分发过来），没有才自己挂
+  // exact 路由。注册过程中途失败时退回 exact 路由，别让存储整条链路失效。
+  const release = []
+  const disposeAll = () => {
+    while (release.length > 0) {
+      const dispose = release.pop()
+      try {
+        dispose()
+      } catch {
+        /* already released */
       }
     }
+  }
+  ctx.effect(() => {
+    if (typeof connection?.fetch?.register === 'function') {
+      try {
+        for (const route of makeFetchRoutes(store)) release.push(connection.fetch.register(route))
+        return disposeAll
+      } catch (error) {
+        disposeAll()
+        ctx.logger?.warn?.(`model-picker: fetch routes unavailable, falling back to exact routes: ${String(error)}`)
+      }
+    }
+    for (const route of makeRoutes(store, ctx)) {
+      try {
+        release.push(ctx.webServer.register(route))
+      } catch (error) {
+        ctx.logger?.warn?.(`model-picker: route ${route.path} unavailable: ${String(error)}`)
+      }
+    }
+    return disposeAll
   }, 'model-picker: state routes')
 }
 
