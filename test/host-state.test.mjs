@@ -314,6 +314,8 @@ test('Fetch 路由：路径在 /api 下、声明方法，且能读写同一份�
       assert.ok(Array.isArray(route.methods) && route.methods.length > 0)
       assert.equal(new Set(route.methods).size, route.methods.length)
       assert.equal(typeof route.fetch, 'function')
+      // bridge 按 requestBody 决定怎么读请求体；显式 buffered 才能让 PUT 的 JSON 体直接可读
+      assert.equal(route.requestBody, 'buffered')
     }
 
     const save = routes.find((route) => route.path === `${ROUTE_BASE}/state/save`)

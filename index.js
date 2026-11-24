@@ -389,6 +389,7 @@ export function makeFetchRoutes(store) {
     {
       path: `${ROUTE_BASE}/state`,
       methods: ['GET'],
+      requestBody: 'buffered',
       fetch: async () => {
         try {
           return json(200, { ok: true, state: await store.read() })
@@ -400,6 +401,7 @@ export function makeFetchRoutes(store) {
     {
       path: `${ROUTE_BASE}/state/save`,
       methods: ['PUT'],
+      requestBody: 'buffered',
       fetch: async (request) => {
         try {
           const body = await request.json()
@@ -415,6 +417,7 @@ export function makeFetchRoutes(store) {
     {
       path: `${ROUTE_BASE}/health`,
       methods: ['GET'],
+      requestBody: 'buffered',
       fetch: async () => json(200, { ok: true, version: STATE_VERSION, file: store.file, transport: 'fetch' }),
     },
   ]
