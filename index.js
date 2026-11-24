@@ -423,15 +423,26 @@ export function makeFetchRoutes(store) {
   ]
 }
 
+// 诊断：把最近一次 apply() 的注册结果落到 state.json 旁边的 last-apply.json，
+// 这样在「没登录浏览器」的情况下也能判断哪条传输通道真的挂上了。
+// 纯排障用途，写失败无所谓（静默忽略）。
+async function writeApplyDiagnostics(store, info) {
+  const file = path.join(path.dirname(store.file), 'last-apply.json')
+  await mkdir(path.dirname(file), { recursive: true })
+  await writeFile(file, `${JSON.stringify({ at: new Date().toISOString(), ...info }, null, 2)}\n`, 'utf8')
+}
+
 export function apply(ctx) {
   const store = createStateStore()
   // Host 半边真的被加载时，磁盘上就会出现这份（可能还是空的）状态文件：
   // 它既是首读的合法起点，也是“Host 半边是否跑起来了”最直接的证据。
   void store.update({}).catch(() => {})
-  const connection = ctx?.connection ?? (typeof ctx?.get === 'function' ? ctx.get('connection', false) : undefined)
-  // 浏览器同源请求要么落到框架的 /api 前缀路由（再按路径转给 Fetch 路由表），
-  // 要么落到本服务器自己的 exact 路由表——两种部署都存在，所以两条都注册，
-  // 单条失败只记一条警告，不让整条存储链路失效。
+  const report = {
+    // connection 服务是否在插件生命周期内就绪（就绪后 Fetch 路由才有地方挂）
+    injectFired: false,
+    fetch: { registered: 0, errors: [] },
+    exact: { registered: 0, errors: [] },
+  }
   const release = []
   const disposeAll = () => {
     while (release.length > 0) {
@@ -443,28 +454,51 @@ export function apply(ctx) {
       }
     }
   }
-  ctx.effect(() => {
-    // 两条通道都挂：Fetch 路由表是 /api 前缀路由的正规分发点（浏览器同源请求
-    // 走的就是它），exact 路由在“组合层把 /api 前缀转给本服务器”的部署里也能用。
-    // 任意一条可用即可，互不影响；都失败时只剩本页缓存。
-    if (typeof connection?.fetch?.register === 'function') {
+  const flush = () => void writeApplyDiagnostics(store, report).catch(() => {})
+
+  // 通道一：connection 服务的 Fetch 路由表。浏览器页面发出的同源请求由 /api
+  // 前缀路由接住（它负责 Host/Origin 围栏与登录 cookie 鉴权），再按路径分发到
+  // 这里注册的精确路由。connection 可能比本插件晚就绪，所以用 ctx.inject 等它：
+  // 就绪时 cordis 会立刻回调，没就绪也不会把整个 apply 卡住。
+  ctx.inject(['connection'], (scope) => {
+    report.injectFired = true
+    scope.effect(() => {
+      const table = scope.connection?.fetch
+      if (typeof table?.register !== 'function') {
+        report.fetch.errors.push('connection.fetch.register not available')
+        flush()
+        return () => {}
+      }
       for (const route of makeFetchRoutes(store)) {
         try {
-          release.push(connection.fetch.register(route))
+          release.push(table.register(route))
+          report.fetch.registered += 1
         } catch (error) {
+          report.fetch.errors.push(`${route.path}: ${String(error)}`)
           ctx.logger?.warn?.(`model-picker: fetch route ${route.path} unavailable: ${String(error)}`)
         }
       }
-    }
+      flush()
+      return () => {}
+    }, 'model-picker: state fetch routes')
+  })
+
+  // 通道二：本服务器自己的 exact 路由表（部分部署会把插件路由直接挂在页面上）。
+  // 两条通道互不影响，单条失败只记一条警告，不让整条存储链路失效——都没有时
+  // 浏览器半边还有 localStorage 兜底。
+  ctx.effect(() => {
     for (const route of makeRoutes(store, ctx)) {
       try {
         release.push(ctx.webServer.register(route))
+        report.exact.registered += 1
       } catch (error) {
+        report.exact.errors.push(`${route.path}: ${String(error)}`)
         ctx.logger?.warn?.(`model-picker: route ${route.path} unavailable: ${String(error)}`)
       }
     }
     return disposeAll
   }, 'model-picker: state routes')
+  flush()
 }
 
 /** 测试接缝：不依赖 Cordis 图也能构造仓库、注册路由、跑归一化。 */

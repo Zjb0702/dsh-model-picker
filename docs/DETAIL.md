@@ -148,14 +148,18 @@
 
 尺寸的读取 / 回填 / 保存链路（切换会话、刷新页面、重启 App 都要保持）：
 
-- **传输层**：Host 半边把两个接口注册到组合层 `connection` 服务的 Fetch 路由表
-  （`connection.fetch.register({ path, methods, fetch })`，路径按框架要求落在 `/api/` 下）。
-  框架自己挂的 `/api` 前缀路由先做 Host/Origin 围栏与浏览器 cookie 鉴权，再按路径把
-  `Request` 转给插件的 `fetch`；插件不再自己判鉴权。组合层没有 `connection` 服务时，才退回
-  `webServer.register` 的 exact 路由（node `req/res` 风格 + `requestRejection`）。
-  Host 半边启动时会先 `store.update({})` 落一份空状态——文件出现即代表 Host 半边确实跑起来了。
+- **传输层**：Host 半边同时挂两条通道。其一把接口注册到组合层 `connection` 服务的 Fetch
+  路由表（`connection.fetch.register({ path, methods, requestBody: 'buffered', fetch })`，
+  路径按框架要求落在 `/api/` 下）：框架自己挂的 `/api` 前缀路由先做 Host/Origin 围栏与浏览器
+  cookie 鉴权，再按路径把 `Request` 转给插件的 `fetch`，插件不再自己判鉴权。`connection` 比
+  插件晚就绪时用 `ctx.inject(['connection'], …)` 等它——晚到不会卡住 `apply()`，早到则立即回调。
+  其二始终挂一套 `webServer.register` 的 exact 路由（node `req/res` 风格 + `requestRejection`）
+  兜底，单条失败只记警告。两条通道的注册结果（成功条数、失败原因）落在
+  `$DSH_HOME/model-picker/last-apply.json`，`~/.dsh/model-picker/state.json` 出现即代表 Host
+  半边确实跑起来了。
 - **本页缓存**：`writeLayoutCache` / `readLayoutCache`（`localStorage` 键
-  `dsh-model-picker/layout`，值经 `normalizeLayout` 归一）。松手时先同步写缓存再发 `PUT`，
+  `dsh-model-picker/layout`，值经 `normalizeLayout` 归一；桌面版窗口源为 `dsh-app://app`，
+  不随 GUI 端口变化，重启 App 后仍有效）。松手时先同步写缓存再发 `PUT`，
   于是切换会话重新挂载组件时，`useState` 初值就是上次的宽高（首帧不闪默认尺寸）；Host 不可用
   时刷新页面也还在。
 - **优先级**：`preferLayout(cached, loaded)`——Host 返回了 `layout` 就用 Host，返回 `null`

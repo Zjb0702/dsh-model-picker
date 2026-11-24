@@ -194,9 +194,7 @@ test('apply：注册三条同源回环路由，并在清理时逐条释放', () 
     effect(fn) {
       disposers.push(fn())
     },
-    get() {
-      return undefined
-    },
+    inject() {},
   }
 
   apply(ctx)
@@ -337,5 +335,57 @@ test('Fetch 路由：路径在 /api 下、声明方法，且能读写同一份�
     assert.equal(bad.status, 400)
   } finally {
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// apply() 的接线：exact 路由总是挂；Fetch 路由要等 connection 服务就绪才挂，
+// 而它晚就绪也不能把 apply 卡住（否则整个 Host 半边都不生效）。
+test('apply：exact 路由总是注册，connection 就绪时才挂 Fetch 路由', async () => {
+  const dir = await tempDir()
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = dir
+  try {
+    const makeCtx = (connection) => {
+      const state = { exact: [], fetch: [] }
+      const ctx = {
+        webServer: {
+          register: (route) => {
+            state.exact.push(route)
+            return () => {}
+          },
+        },
+        effect: (run) => {
+          run()
+          return () => {}
+        },
+        logger: { warn() {} },
+        inject: (deps, run) => {
+          if (connection) run({ ...ctx, connection })
+        },
+      }
+      if (connection) {
+        connection.fetch.register = (route) => {
+          state.fetch.push(route)
+          return () => {}
+        }
+      }
+      return { ctx, state }
+    }
+
+    const withConnection = makeCtx({ fetch: {} })
+    apply(withConnection.ctx)
+    assert.equal(withConnection.state.exact.length, 3)
+    assert.equal(withConnection.state.fetch.length, 3)
+
+    const withoutConnection = makeCtx(undefined)
+    apply(withoutConnection.ctx)
+    assert.equal(withoutConnection.state.exact.length, 3)
+    assert.equal(withoutConnection.state.fetch.length, 0)
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    // apply() 会顺手落一次诊断文件（异步）：等它写完再删目录，否则 ENOTEMPTY。
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await rm(dir, { recursive: true, force: true, maxRetries: 5 })
   }
 })

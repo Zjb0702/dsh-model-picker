@@ -74,11 +74,14 @@ plugin_manager({ action: "install_bundle", target: "D:\\Documents\\deepseek-harn
 
 尺寸是**全局偏好**（所有会话共用一份），不按会话分开存。读写链路有三层：
 
-1. **Host 状态文件**（权威、跨重启）：Host 半边通过组合层 `connection` 服务的 Fetch 路由表注册
-   `GET /api/dsh-model-picker/state` 与 `PUT .../state/save`——`/api` 前缀路由由框架挂载，
-   负责鉴权与请求体，再按路径转给插件；组合层没有 `connection` 时才退回自挂 exact 路由。
+1. **Host 状态文件**（权威、跨重启）：Host 半边把 `GET /api/dsh-model-picker/state` 与
+   `PUT .../state/save` 注册到组合层 `connection` 服务的 Fetch 路由表（`/api` 前缀路由由框架
+   挂载，负责鉴权与请求体，再按路径转给插件），同时保留一套 `webServer.register` 的 exact
+   路由兜底；`connection` 可能比插件晚就绪，所以用 `ctx.inject(['connection'])` 等它，晚到也
+   不会把 Host 半边卡住。哪条通道真的挂上了，看 `~/.dsh/model-picker/last-apply.json`。
 2. **本页缓存**（`localStorage` 键 `dsh-model-picker/layout`）：松手瞬间就写，组件重新挂载
    （切换会话）时首帧直接按它渲染，不会先闪一下默认尺寸；Host 暂时不可用时刷新也还在。
+   桌面版窗口的源是 `dsh-app://app`（不随端口变化），所以这份缓存在重启 App 之后同样有效。
 3. **读取优先级**：Host 有记录用 Host，Host 说“没有记录”才退回本页缓存；Host 读请求失败会
    轻量重试一次，仍失败就静默降级。
 
