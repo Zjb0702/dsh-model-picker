@@ -429,9 +429,9 @@ export function apply(ctx) {
   // 它既是首读的合法起点，也是“Host 半边是否跑起来了”最直接的证据。
   void store.update({}).catch(() => {})
   const connection = ctx?.connection ?? (typeof ctx?.get === 'function' ? ctx.get('connection', false) : undefined)
-  // 注册两条路径择一：有 connection 服务就走框架的 Fetch 路由表（/api 前缀路由
-  // 负责 Host/Origin 围栏与浏览器 cookie 鉴权，再按路径分发过来），没有才自己挂
-  // exact 路由。注册过程中途失败时退回 exact 路由，别让存储整条链路失效。
+  // 浏览器同源请求要么落到框架的 /api 前缀路由（再按路径转给 Fetch 路由表），
+  // 要么落到本服务器自己的 exact 路由表——两种部署都存在，所以两条都注册，
+  // 单条失败只记一条警告，不让整条存储链路失效。
   const release = []
   const disposeAll = () => {
     while (release.length > 0) {
@@ -444,13 +444,16 @@ export function apply(ctx) {
     }
   }
   ctx.effect(() => {
+    // 两条通道都挂：Fetch 路由表是 /api 前缀路由的正规分发点（浏览器同源请求
+    // 走的就是它），exact 路由在“组合层把 /api 前缀转给本服务器”的部署里也能用。
+    // 任意一条可用即可，互不影响；都失败时只剩本页缓存。
     if (typeof connection?.fetch?.register === 'function') {
-      try {
-        for (const route of makeFetchRoutes(store)) release.push(connection.fetch.register(route))
-        return disposeAll
-      } catch (error) {
-        disposeAll()
-        ctx.logger?.warn?.(`model-picker: fetch routes unavailable, falling back to exact routes: ${String(error)}`)
+      for (const route of makeFetchRoutes(store)) {
+        try {
+          release.push(connection.fetch.register(route))
+        } catch (error) {
+          ctx.logger?.warn?.(`model-picker: fetch route ${route.path} unavailable: ${String(error)}`)
+        }
       }
     }
     for (const route of makeRoutes(store, ctx)) {
