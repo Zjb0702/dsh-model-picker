@@ -369,35 +369,33 @@ test('preferLayout：Host 有记录就用 Host，没有才退回本页缓存', (
   assert.equal(preferLayout(undefined, null), null);
 });
 
-// —— 档位继承按“会话是否已建立自己的选择”区分（新建会话 vs 旧会话）——
-// 需求：当前会话把某模型设为 high 后，新建会话沿用该模型应得 high；而更早
-// 就存在的旧会话切换到这个模型时应仍为低（默认档）。判据 seeded 由组件传参：
-//   seeded=false  → 会话尚未有自己的模型选择（新建会话）；
-//   seeded=true   → 会话已建立选择（旧会话 / 当前会话）。
-test('resolveEffortSelection：新建会话显示全局记忆档，旧会话显示宿主档', () => {
+// —— 全局记忆：任何会话设的档位在其他会话同样生效 ——
+test('resolveEffortSelection：记忆档位全局生效，不区分会话新旧', () => {
   const m = model('m', ['low', 'high'], 'low')
-  // 新建会话：宿主投影为空（selection=null），记忆是 high → 显示 high
-  assert.deepEqual(resolveEffortSelection(null, m, 'high', false), { host: 'low', display: 'high' })
-  // 旧会话：宿主投影是 low，记忆是 high → 显示跟随宿主 low（不被全局记忆抬高）
-  assert.deepEqual(resolveEffortSelection({ reasoningEffort: 'low' }, m, 'high', true), { host: 'low', display: 'low' })
-  // 当前会话：宿主已生效 high → 显示 high（自身不受影响）
-  assert.deepEqual(resolveEffortSelection({ reasoningEffort: 'high' }, m, 'high', true), { host: 'high', display: 'high' })
-  // 旧会话但记忆档位无效：仍回落宿主档
-  assert.deepEqual(resolveEffortSelection({ reasoningEffort: 'low' }, m, 'max', true), { host: 'low', display: 'low' })
+  // 宿主投影为空（新会话），记忆是 high → 显示 high
+  assert.deepEqual(resolveEffortSelection(null, m, 'high'), { host: 'low', display: 'high' })
+  // 宿主投影是 low（旧会话），记忆是 high → 显示记忆 high（全局生效）
+  assert.deepEqual(resolveEffortSelection({ reasoningEffort: 'low' }, m, 'high'), { host: 'low', display: 'high' })
+  // 宿主已生效 high → 显示 high
+  assert.deepEqual(resolveEffortSelection({ reasoningEffort: 'high' }, m, 'high'), { host: 'high', display: 'high' })
+  // 记忆档位无效 → 回落宿主档
+  assert.deepEqual(resolveEffortSelection({ reasoningEffort: 'low' }, m, 'max'), { host: 'low', display: 'low' })
+  // 没有记忆 → 显示宿主档
+  assert.deepEqual(resolveEffortSelection({ reasoningEffort: 'low' }, m, undefined), { host: 'low', display: 'low' })
 })
 
-test('resolveSwitchEffort：换模型时新建会话沿用记忆，旧会话只按默认档', () => {
+test('resolveSwitchEffort：换模型时全局记忆生效，同路由保留当前档', () => {
   const m = model('m2', ['low', 'high'], 'low')
-  // 旧会话（seeded=true）从 m1 切到 m2，记忆里是 high → 仍给默认 low
-  const oldSession = resolveSwitchEffort({ provider: 'p', model: 'm1', reasoningEffort: 'low' }, 'p', m, 'high', true)
-  assert.deepEqual(oldSession, { onSameRoute: false, effort: 'low' })
-  // 新建会话（seeded=false）切到 m2，记忆里是 high → 沿用 high
-  const newSession = resolveSwitchEffort({ provider: 'p', model: 'm1', reasoningEffort: 'low' }, 'p', m, 'high', false)
-  assert.deepEqual(newSession, { onSameRoute: false, effort: 'high' })
-  // 同一条路由始终保留当前档位，不受 seeded 影响
-  const same = resolveSwitchEffort({ provider: 'p', model: 'm2', reasoningEffort: 'high' }, 'p', m, 'low', true)
+  // 从 m1 切到 m2，记忆里是 high → 回填 high（全局记忆，不区分会话）
+  const switched = resolveSwitchEffort({ provider: 'p', model: 'm1', reasoningEffort: 'low' }, 'p', m, 'high')
+  assert.deepEqual(switched, { onSameRoute: false, effort: 'high' })
+  // 同一条路由保留当前档位
+  const same = resolveSwitchEffort({ provider: 'p', model: 'm2', reasoningEffort: 'high' }, 'p', m, 'low')
   assert.deepEqual(same, { onSameRoute: true, effort: 'high' })
-  // 旧会话且没有记忆：也按默认档
-  const noMemory = resolveSwitchEffort({ provider: 'p', model: 'm1', reasoningEffort: 'low' }, 'p', m, undefined, true)
+  // 没有记忆 → 默认档
+  const noMemory = resolveSwitchEffort({ provider: 'p', model: 'm1', reasoningEffort: 'low' }, 'p', m, undefined)
   assert.deepEqual(noMemory, { onSameRoute: false, effort: 'low' })
+  // 记忆档位失效 → 默认档
+  const stale = resolveSwitchEffort({ provider: 'p', model: 'm1', reasoningEffort: 'low' }, 'p', m, 'max')
+  assert.deepEqual(stale, { onSameRoute: false, effort: 'low' })
 })
