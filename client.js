@@ -366,21 +366,28 @@ window.__ModuleLoader__.load({
 		//   display = 记忆里的档位（若该模型支持）否则 host。
 		// 两者分开是必要的：重启后投影可能丢档位，而记忆仍在；显示跟记忆走，
 		// “是否需要再提交一次”跟 host 比。
-		const resolveEffortSelection = (selection, model, remembered) => {
+		const resolveEffortSelection = (selection, model, remembered, seeded) => {
 			const defaultEffort = model?.reasoning?.defaultEffort;
 			const host = selection !== null && supportsEffort(model, selection.reasoningEffort)
 				? selection.reasoningEffort
 				: defaultEffort;
-			const display = supportsEffort(model, remembered) ? remembered : host;
+			// 记忆里的档位只在「会话尚未建立自己的选择」时作为全局默认值生效：
+			// 新建会话（seeded=false）沿用全局记忆；已经存在自己选择的旧会话
+			// （seeded=true）显示跟宿主当前档位走，不再被全局记忆抬高。
+			const display = !seeded && supportsEffort(model, remembered) ? remembered : host;
 			return { host, display };
 		};
 		// 点某个模型时要提交的档位：同一条路由沿用当前档位；换了模型则优先回填
 		// 这个模型上次记住的档位，没有记忆（或记忆档位失效）才用目录默认值。
-		const resolveSwitchEffort = (selection, providerId, model, remembered) => {
+		const resolveSwitchEffort = (selection, providerId, model, remembered, seeded) => {
 			const onSameRoute = selection !== null
 				&& selection.provider === providerId && selection.model === model.id;
 			if (onSameRoute) return { onSameRoute, effort: selection.reasoningEffort };
-			return { onSameRoute, effort: supportsEffort(model, remembered) ? remembered : model.reasoning?.defaultEffort };
+			// 换模型：新建会话（seeded=false）沿用全局记忆；旧会话（seeded=true）
+			// 只按目标模型自己的默认档位，不再套用全局记忆，避免“之后设的 high”
+			// 污染“之前就存在的会话”。
+			const inherit = !seeded && supportsEffort(model, remembered);
+			return { onSameRoute, effort: inherit ? remembered : model.reasoning?.defaultEffort };
 		};
 		// 拖动排序的落点：把 dragId 移到 target 之前的目标位置。
 		// target 用“行下标”语义（0..行数），行数表示拖到末尾。
@@ -780,6 +787,12 @@ window.__ModuleLoader__.load({
 					const projection = readProjection('modelSelection');
 					const projected = projection?.next ?? projection?.lastUsed ?? null;
 					const current = optimistic ?? projected ?? catalog.value?.default ?? null;
+					// 会话是否已经建立自己的模型选择（投影里有记录，或本页刚提交过）。
+					// 新建会话在第一次选择前 projected 与 optimistic 都为空；旧会话已有选择。
+					// 用它代替“会话创建时间”来区分新旧：客户端会话列表只暴露 updatedAt
+					// （= max(createdAt, lastPromptAt)），拿不到稳定 createdAt，而“是否已有选择”
+					// 正是需求里“之前/之后”的可靠代理。
+					const seeded = projected !== null || optimistic !== null;
 
 					const groups = catalog.value?.groups ?? [];
 					// 左侧实际顺序：记忆顺序在前，目录里新出现的按目录顺序接在后面。
@@ -816,7 +829,7 @@ window.__ModuleLoader__.load({
 					const rememberedEffortId = current === null
 						? undefined
 						: findRememberedEffort(pickerState, current.provider, current.model);
-					const effortSelection = resolveEffortSelection(current, currentModel, rememberedEffortId);
+					const effortSelection = resolveEffortSelection(current, currentModel, rememberedEffortId, seeded);
 					const hostEffortId = effortSelection.host;
 					const currentEffortId = effortSelection.display;
 
@@ -1280,10 +1293,11 @@ window.__ModuleLoader__.load({
 					}, [persistPickerPatch]);
 
 					const chooseModel = useCallback(async (group, model) => {
-						// 换了模型时优先回填“这个模型上次记住的档位”；没有记忆才用目录默认值。
-						// 同一条路由下保留当前档位不变（见 resolveSwitchEffort）。
+						// 换模型时的档位：新建会话沿用全局记忆；已建立选择的旧会话只按
+						// 目标模型自己的默认档位（见 resolveSwitchEffort 的 seeded 分支）。
+						// 同一条路由下保留当前档位不变。
 						const remembered = findRememberedEffort(pickerState, group.id, model.id);
-						const { onSameRoute, effort } = resolveSwitchEffort(current, group.id, model, remembered);
+						const { onSameRoute, effort } = resolveSwitchEffort(current, group.id, model, remembered, seeded);
 						if (onSameRoute && effort === current.reasoningEffort) { setOpen(false); return; }
 						const ok = await submit({
 							provider: group.id,
@@ -1291,7 +1305,7 @@ window.__ModuleLoader__.load({
 							...(effort === undefined ? {} : { reasoningEffort: effort }),
 						});
 						if (ok) setOpen(false);
-					}, [current, pickerState, submit]);
+					}, [current, pickerState, submit, seeded]);
 
 					const chooseEffort = useCallback(async (nextEffortId) => {
 						if (current === null) return;
