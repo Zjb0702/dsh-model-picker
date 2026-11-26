@@ -89,9 +89,17 @@
 
 ### 全局记忆
 
-档位记忆在所有会话间共享：任何一个会话里设的档位，在其他会话里同样回填。
-`resolveEffortSelection` 和 `resolveSwitchEffort` 不区分会话新旧——显示档位始终跟记忆走
-（若该模型支持），换模型时优先回填记忆档位，没有记忆才用目录默认值。
+档位记忆在所有会话间共享：任何一个会话里设的档位，在其他会话里同样回填——
+包括比设档会话**更早创建**的会话。`resolveEffortSelection` 和 `resolveSwitchEffort`
+不区分会话新旧——显示档位始终跟记忆走（若该模型支持），换模型时优先回填记忆档位，
+没有记忆才用目录默认值。
+
+**持久化兜底**：Host 的 `/api/dsh-model-picker/state` 路由在桌面版部署中可能被框架
+的 `/api` 前缀路由接管（返回 401），导致 `state.json` 的 `efforts` 始终为空。
+为此客户端在 `localStorage`（键 `dsh-model-picker/prefs`）中同步缓存档位记忆和
+供应商顺序：写入时同步落缓存，读取时 Host 有数据用 Host、Host 为空用缓存
+（`mergePrefsWithCache`）。这样即使 Host 路由不可用，切会话、刷新页面后记忆
+也不丢失。
 
 ## 供应商顺序
 

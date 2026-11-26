@@ -555,6 +555,41 @@ window.__ModuleLoader__.load({
 		// 时，宽高也不会在切换会话或刷新页面后被打回默认值。
 		const preferLayout = (cached, loaded) => (loaded === null || loaded === undefined ? cached ?? null : loaded);
 		// #endregion
+		// 偏好缓存：Host 路由不可用时（401 等），efforts 和 providerOrder 也需要
+		// localStorage 兜底，否则切会话/刷新后记忆丢失。
+		const PREFS_CACHE_KEY = 'dsh-model-picker/prefs';
+		let cachedPrefs;
+		let cachedPrefsRead = false;
+		const readPrefsCache = () => {
+			if (cachedPrefsRead) return cachedPrefs;
+			cachedPrefsRead = true;
+			try {
+				const raw = window.localStorage.getItem(PREFS_CACHE_KEY);
+				const parsed = raw === null ? null : JSON.parse(raw);
+				cachedPrefs = normalizePickerState(parsed);
+			} catch {
+				cachedPrefs = null;
+			}
+			return cachedPrefs;
+		};
+		const writePrefsCache = (state) => {
+			const value = normalizePickerState(state);
+			cachedPrefs = value;
+			cachedPrefsRead = true;
+			try {
+				window.localStorage.setItem(PREFS_CACHE_KEY, JSON.stringify(value));
+			} catch { /* quota exceeded or private mode */ }
+		};
+		// 合并 Host 状态与本地缓存：Host 有数据的字段用 Host，Host 为空的字段用缓存。
+		// Host 的 state.json 是权威来源，但路由可能不可用；缓存保证本地不丢。
+		const mergePrefsWithCache = (host, cached) => {
+			if (cached === null || cached === undefined) return host;
+			return {
+				layout: preferLayout(cached.layout, host.layout),
+				providerOrder: host.providerOrder.length > 0 ? host.providerOrder : cached.providerOrder,
+				efforts: host.efforts.length > 0 ? host.efforts : cached.efforts,
+			};
+		};
 		// 尺寸缓存：Host 的 state.json 是唯一的跨重启来源，但读它是异步的。
 		// 组件重挂载（切换会话）时先用内存缓存同步渲染，避免“先跳回默认尺寸再
 		// 跳回来”；Host 暂时不可用时（路由缺失、请求被拒），本地缓存还能让宽高
@@ -751,7 +786,10 @@ window.__ModuleLoader__.load({
 					const [dragIndex, setDragIndex] = useState(null);
 					const [dragging, setDragging] = useState(false);
 					// 偏好：从 Host 侧存储读入（供应商顺序 + 按模型记的档位）。
-					const [pickerState, setPickerState] = useState({ layout: null, providerOrder: [], efforts: [] });
+					const [pickerState, setPickerState] = useState(() => {
+						const cached = readPrefsCache();
+						return cached ?? { layout: null, providerOrder: [], efforts: [] };
+					});
 					// 供应商拖动排序：dragId = 正在拖的那一家；liveOrder = 拖动中的
 					// 临时顺序（松手才落盘，中途取消就丢弃预览）。
 					const [dragId, setDragId] = useState(null);
@@ -872,11 +910,13 @@ window.__ModuleLoader__.load({
 					// 让供应商/模型列表跟上宿主侧的变化（宿主有缓存，代价很小）。
 					// 读回来的偏好里也带着尺寸：只有本页还没拖过尺寸时才套用。
 					const applyLoadedState = useCallback((value) => {
-						setPickerState(value);
+						const merged = mergePrefsWithCache(value, readPrefsCache());
+						setPickerState(merged);
+						writePrefsCache(merged);
 						// Host 给的就是权威值；Host 说“没有记录”时才退回本页缓存。
 						const layout = preferLayout(readLayoutCache(), value.layout);
 						if (layout === null) return;
-						if (layout !== value.layout) writeLayoutCache(layout);
+						if (layout !== merged.layout) writeLayoutCache(layout);
 						if (sizeTouchedRef.current) return;
 						// 只套用宽高；水平偏移是本次会话里被拖出来的，不持久化。
 						setSize((previous) => ({
@@ -1274,11 +1314,19 @@ window.__ModuleLoader__.load({
 							.catch(() => { /* 存储不可用：保留内存里的记忆 */ });
 					}, []);
 					const rememberEffort = useCallback((provider, model, effortId) => {
-						setPickerState((previous) => rememberEffortIn(previous, provider, model, effortId));
+						setPickerState((previous) => {
+							const next = rememberEffortIn(previous, provider, model, effortId);
+							writePrefsCache(next);
+							return next;
+						});
 						persistPickerPatch({ effort: { provider, model, effort: effortId } });
 					}, [persistPickerPatch]);
 					const persistOrder = useCallback((ids) => {
-						setPickerState((previous) => ({ ...previous, providerOrder: ids }));
+						setPickerState((previous) => {
+							const next = { ...previous, providerOrder: ids };
+							writePrefsCache(next);
+							return next;
+						});
 						persistPickerPatch({ providerOrder: ids });
 					}, [persistPickerPatch]);
 

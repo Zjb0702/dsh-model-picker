@@ -399,3 +399,23 @@ test('resolveSwitchEffort：换模型时全局记忆生效，同路由保留当�
   const stale = resolveSwitchEffort({ provider: 'p', model: 'm1', reasoningEffort: 'low' }, 'p', m, 'max')
   assert.deepEqual(stale, { onSameRoute: false, effort: 'low' })
 })
+
+// —— DSH 场景：比设档会话更早创建的会话也回填全局记忆档位 ——
+// 场景：会话 OLD（创建于 T1）一直用默认 low；会话 A（创建于 T2 > T1）把模型设为 high。
+// 切回 OLD 会话，打开面板切到该模型 → 应显示 high（全局记忆），而非 low。
+test('DSH 场景：更早会话切到已设档模型时回填全局记忆', () => {
+  const m = model('m1', ['low', 'high'], 'low')
+  // 会话 OLD 的宿主投影里该模型档位是 low（它自己从来没设过）
+  const oldSessionProjection = { provider: 'p', model: 'm1', reasoningEffort: 'low' }
+  // 会话 A 写入的全局记忆是 high
+  const remembered = 'high'
+  // 显示档位：记忆 high 覆盖宿主 low（全局记忆不区分会话新旧）
+  const sel = resolveEffortSelection(oldSessionProjection, m, remembered)
+  assert.deepEqual(sel, { host: 'low', display: 'high' })
+  // 换模型提交：从别的模型切到 m1 → 回填 high
+  const sw = resolveSwitchEffort({ provider: 'p', model: 'other', reasoningEffort: 'low' }, 'p', m, remembered)
+  assert.deepEqual(sw, { onSameRoute: false, effort: 'high' })
+  // 同路由保留：OLD 会话如果已经手动改成了 high，不再被记忆覆盖
+  const same = resolveSwitchEffort({ provider: 'p', model: 'm1', reasoningEffort: 'high' }, 'p', m, 'low')
+  assert.deepEqual(same, { onSameRoute: true, effort: 'high' })
+})
